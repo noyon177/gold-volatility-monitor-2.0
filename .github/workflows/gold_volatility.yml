@@ -1,4 +1,4 @@
-name: Market Scanner
+- run: python main.py
 
 on:
   schedule:
