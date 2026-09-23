@@ -1,14 +1,13 @@
 import os
 import requests
-import numpy as np
 
 TWELVE_DATA_API_KEY = os.environ["TWELVE_DATA_API_KEY"]
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
 # NOTE: "DJI" is used as the US30 (Dow Jones) symbol on Twelve Data.
-# Verify this via https://api.twelvedata.com/symbol_search?symbol=US30
-# and swap it below if Twelve Data lists a different ticker for your account.
+# Verify via https://api.twelvedata.com/symbol_search?symbol=US30
+# and change it below if needed.
 SYMBOLS = ["XAU/USD", "BTC/USD", "GBP/USD", "USD/JPY", "DJI"]
 
 INTERVAL = "15min"
@@ -41,15 +40,28 @@ def fetch_candles(symbol):
 
 
 def compute_rsi(closes, period=RSI_PERIOD):
-    closes = np.array(closes)
-    deltas = np.diff(closes)
-    gains = np.where(deltas > 0, deltas, 0.0)
-    losses = np.where(deltas < 0, -deltas, 0.0)
-    avg_gain = np.mean(gains[:period])
-    avg_loss = np.mean(losses[:period])
-    for i in range(period, len(deltas)):
+    """Pure-Python RSI calculation — no external libraries needed."""
+    gains = []
+    losses = []
+    for i in range(1, len(closes)):
+        change = closes[i] - closes[i - 1]
+        if change > 0:
+            gains.append(change)
+            losses.append(0.0)
+        else:
+            gains.append(0.0)
+            losses.append(-change)
+
+    if len(gains) < period:
+        return 50.0  # not enough data yet, neutral RSI
+
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+
+    for i in range(period, len(gains)):
         avg_gain = (avg_gain * (period - 1) + gains[i]) / period
         avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+
     if avg_loss == 0:
         return 100.0
     rs = avg_gain / avg_loss
