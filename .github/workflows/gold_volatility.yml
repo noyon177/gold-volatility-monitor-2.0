@@ -26,4 +26,6 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           VOLATILITY_THRESHOLD_PERCENT: "0.5"
           WINDOW_HOURS: "2"
+          SQUEEZE_RATIO_THRESHOLD: "0.4"
+          CALENDAR_ALERT_ENABLED: "true"
         run: python main.py
