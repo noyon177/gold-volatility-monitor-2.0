@@ -2,8 +2,8 @@ name: Gold Volatility Monitor
 
 on:
   schedule:
-    - cron: "*/15 * * * *"
-  workflow_dispatch: {}
+    - cron: "*/15 * * * *"   # à¦ªà§à¦°à¦¤à¦¿ à§§à§« à¦®à¦¿à¦¨à¦¿à¦Ÿà§‡ à¦…à¦Ÿà§‹à¦®à§‡à¦Ÿà¦¿à¦• à¦šà¦²à¦¬à§‡
+  workflow_dispatch: {}       # à¦šà¦¾à¦‡à¦²à§‡ à¦®à§à¦¯à¦¾à¦¨à§à¦¯à¦¼à¦¾à¦²à¦¿ à¦°à¦¾à¦¨ à¦•à¦°à¦¾ à¦¯à¦¾à¦¬à§‡
 
 jobs:
   check-volatility:
@@ -22,8 +22,8 @@ jobs:
 
       - name: Run volatility check
         env:
-          ALPHA_VANTAGE_API_KEY: ${{ secrets.ALPHA_VANTAGE_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          ATR_THRESHOLD_PERCENT: "0.5"
+          VOLATILITY_THRESHOLD_PERCENT: "0.5"
+          WINDOW_HOURS: "2"
         run: python main.py
