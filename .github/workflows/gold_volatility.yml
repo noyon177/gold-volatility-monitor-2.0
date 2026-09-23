@@ -2,8 +2,8 @@ name: Gold Volatility Monitor
 
 on:
   schedule:
-    - cron: "*/15 * * * *"   # à¦ªà§à¦°à¦¤à¦¿ à§§à§« à¦®à¦¿à¦¨à¦¿à¦Ÿà§‡ à¦…à¦Ÿà§‹à¦®à§‡à¦Ÿà¦¿à¦• à¦šà¦²à¦¬à§‡
-  workflow_dispatch: {}       # à¦šà¦¾à¦‡à¦²à§‡ à¦®à§à¦¯à¦¾à¦¨à§à¦¯à¦¼à¦¾à¦²à¦¿ à¦°à¦¾à¦¨ à¦•à¦°à¦¾ à¦¯à¦¾à¦¬à§‡
+    - cron: "*/15 * * * *"
+  workflow_dispatch: {}
 
 jobs:
   check-volatility:
