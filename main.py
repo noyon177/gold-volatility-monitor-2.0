@@ -5,7 +5,7 @@ TWELVE_DATA_API_KEY = os.environ["TWELVE_DATA_API_KEY"]
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
-# NOTE: "DJI" is used as the US30 (Dow Jones) symbol on Twelve Data.
+# NOTE: "DIA" is used as the US30 (Dow Jones) symbol on Twelve Data.
 # Verify via https://api.twelvedata.com/symbol_search?symbol=US30
 # and change it below if needed.
 SYMBOLS = ["XAU/USD", "BTC/USD", "GBP/USD", "USD/JPY", "DIA"]
