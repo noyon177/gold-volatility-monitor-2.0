@@ -18,6 +18,10 @@ RSI_OVERSOLD = 30
 SR_LOOKBACK = 20        # candles to look back for support/resistance
 SR_TOUCH_PCT = 0.15     # % distance from a level that counts as "near"
 
+# --- Volatility alert settings ---
+VOLATILITY_LOOKBACK = 8     # candles to look back (8 x 15min = ~2 hours)
+VOLATILITY_THRESHOLD_PCT = 0.5   # % range vs current price that counts as "volatile"
+
 
 def fetch_candles(symbol):
     url = "https://api.twelvedata.com/time_series"
@@ -75,10 +79,6 @@ def find_support_resistance(candles, lookback=SR_LOOKBACK):
     return max(highs), min(lows)
 
 
-def is_near(price, level, pct=SR_TOUCH_PCT):
-    return abs(price - level) / level * 100 <= pct
-
-
 def is_reversal_candle(candles):
     """Simple bullish/bearish engulfing check on the last 2 candles."""
     if len(candles) < 2:
@@ -103,6 +103,39 @@ def is_reversal_candle(candles):
     return None
 
 
+def check_sr_proximity(price, resistance, support, pct=SR_TOUCH_PCT):
+    """
+    FIX: previously this checked resistance and support independently,
+    so a price sitting between two close-together levels (both within
+    pct%) triggered BOTH alerts at once (saw this on USD/JPY — price
+    was clearly closer to resistance but the tight S/R range meant the
+    support check also passed). Now only the nearer level fires, and
+    only if it's actually within pct%.
+    """
+    dist_to_resistance = abs(price - resistance) / resistance * 100
+    dist_to_support = abs(price - support) / support * 100
+
+    if dist_to_resistance <= pct and dist_to_resistance <= dist_to_support:
+        return f"রেজিস্ট্যান্সের কাছে ({resistance:.4f})"
+    if dist_to_support <= pct and dist_to_support <= dist_to_resistance:
+        return f"সাপোর্টের কাছে ({support:.4f})"
+    return None
+
+
+def check_volatility(candles, lookback=VOLATILITY_LOOKBACK, threshold=VOLATILITY_THRESHOLD_PCT):
+    """New: flags a market as volatile/restless if its recent price range
+    is wide relative to the current price — same idea as the gold alert bot,
+    now applied to every scanned symbol."""
+    recent = candles[-lookback:]
+    high = max(c["high"] for c in recent)
+    low = min(c["low"] for c in recent)
+    price = candles[-1]["close"]
+    range_pct = (high - low) / price * 100
+    if range_pct >= threshold:
+        return range_pct, high, low
+    return None
+
+
 def send_telegram(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     requests.post(
@@ -122,16 +155,15 @@ def scan_symbol(symbol):
     rsi = compute_rsi(closes)
     resistance, support = find_support_resistance(candles)
     reversal = is_reversal_candle(candles)
+    sr_alert = check_sr_proximity(price, resistance, support)
 
     alerts = []
     if rsi >= RSI_OVERBOUGHT:
         alerts.append(f"RSI ওভারবট ({rsi:.1f})")
     elif rsi <= RSI_OVERSOLD:
         alerts.append(f"RSI ওভারসোল্ড ({rsi:.1f})")
-    if is_near(price, resistance):
-        alerts.append(f"রেজিস্ট্যান্সের কাছে ({resistance:.4f})")
-    if is_near(price, support):
-        alerts.append(f"সাপোর্টের কাছে ({support:.4f})")
+    if sr_alert:
+        alerts.append(sr_alert)
     if reversal:
         alerts.append(f"{reversal} ক্যান্ডেল")
 
@@ -141,9 +173,23 @@ def scan_symbol(symbol):
             f"প্রাইস: {price:.4f}\n" + "\n".join(f"• {a}" for a in alerts)
         )
         send_telegram(msg)
-        print(f"[{symbol}] alert sent: {alerts}")
+        print(f"[{symbol}] setup alert sent: {alerts}")
     else:
-        print(f"[{symbol}] no signal. price={price:.4f} rsi={rsi:.1f}")
+        print(f"[{symbol}] no setup signal. price={price:.4f} rsi={rsi:.1f}")
+
+    # --- Volatility alert (independent of the setup alerts above) ---
+    vol = check_volatility(candles)
+    if vol:
+        range_pct, high, low = vol
+        vol_msg = (
+            f"🔔 <b>{symbol} মার্কেট ভোলাটিলিটি অ্যালার্ট</b>\n\n"
+            f"বর্তমান দাম: {price:.4f}\n"
+            f"গত {VOLATILITY_LOOKBACK * 15 // 60} ঘণ্টার রেঞ্জ: {low:.4f} - {high:.4f}\n"
+            f"ভোলাটিলিটি: {range_pct:.3f}% (থ্রেশহোল্ড: {VOLATILITY_THRESHOLD_PCT}%)\n\n"
+            f"⚠️ মার্কেটে স্বাভাবিকের চেয়ে বেশি মুভমেন্ট হচ্ছে।"
+        )
+        send_telegram(vol_msg)
+        print(f"[{symbol}] volatility alert sent: {range_pct:.3f}%")
 
 
 def main():
