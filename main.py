@@ -14,7 +14,7 @@
 - দুই লেভেল: 🟡 অস্থির, 🔴 খুবই অস্থির (লেভেল বাড়লে সাথে সাথে জানায়)।
 - "শান্ত হয়েছে" মেসেজ: অস্থিরতা শেষ হলে জানায়।
 - ডেটা-ডাউন ওয়ার্নিং: ডেটা না এলে চুপ না থেকে জানায়, ফিরলেও জানায়।
-- গোল্ড রানে ২ বার, BTC প্রতি ২০ সেকেন্ডে।
+- গোল্ড রানে ২ বার, BTC প্রতি ২০ সেকেন্ডে (Kraken থেকে, ব্যাকআপ Coinbase)।
 - API কী/টোকেন এরর মেসেজ থেকে মুছে ফেলা হয়।
 """
 import datetime as dt
@@ -103,14 +103,46 @@ def gold_candles():
     return out
 
 
-def btc_candles():
-    # Coinbase ফরম্যাট: [time, low, high, open, close, volume]
+def btc_kraken():
+    # Kraken: প্রায় রিয়েল-টাইম, চলমান ক্যান্ডেলসহ। ফরম্যাট: [time, o, h, l, c, vwap, volume, count]
+    data = get_json(
+        "https://api.kraken.com/0/public/OHLC", {"pair": "XBTUSD", "interval": 1}
+    )
+    if data.get("error"):
+        raise RuntimeError("Kraken: " + str(data["error"])[:150])
+    rows = next(v for k, v in data["result"].items() if k != "last")
+    return [
+        (float(r[0]), float(r[1]), float(r[2]), float(r[3]), float(r[4]), float(r[6]))
+        for r in rows
+    ]
+
+
+def btc_coinbase():
+    # Coinbase ফরম্যাট: [time, low, high, open, close, volume]। এই ফিড কখনো ৩-৪ মিনিট পিছিয়ে থাকে।
     rows = get_json(
         "https://api.exchange.coinbase.com/products/BTC-USD/candles",
         {"granularity": 60},
     )
     rows = sorted(rows, key=lambda x: x[0])
     return [(t, o, h, l, c, v) for t, l, h, o, c, v in rows]
+
+
+def btc_candles():
+    """আগে Kraken, না হলে Coinbase। যেটা তাজা (MAX_STALE-এর ভেতরে) সেটাই ব্যবহার হয়।"""
+    best, last_err = None, None
+    for src in (btc_kraken, btc_coinbase):
+        try:
+            c = src()
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            continue
+        if time.time() - c[-1][0] <= MAX_STALE:
+            return c
+        if best is None or c[-1][0] > best[-1][0]:
+            best = c
+    if best is None:
+        raise RuntimeError(safe(last_err))
+    return best
 
 
 # th = থ্রেশহোল্ড (None মানে ওই মেট্রিক বন্ধ)। প্রথমে এই মান দিয়ে চালান, অ্যালার্ট বেশি/কম মনে হলে বদলান।
@@ -121,7 +153,7 @@ MARKETS = {
     },
     "BTC": {
         "name": "বিটকয়েন (BTC)", "fetch": btc_candles, "poll": BTC_POLL, "fail_limit": 6,
-        "th": {"atr": 2.5, "r5": 2.0, "pvt": 4.0},
+        "th": {"atr": 2.5, "r5": 2.0, "pvt": 6.0},
     },
 }
 
