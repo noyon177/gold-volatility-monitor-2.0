@@ -3,6 +3,7 @@
 
 - প্রতি রান ~৪.৫ মিনিট চলে, ৩০ সেকেন্ড পরপর দাম দেখে (GitHub Actions ৫ মিনিটে একবার চালায়)।
 - চলমান ১ মিনিটের ক্যান্ডেলের রেঞ্জ আগের ৬০ ক্যান্ডেলের গড় রেঞ্জের THRESHOLD গুণ ছাড়ালে মেসেজ।
+- গোল্ড আর বিটকয়েনের জন্য আলাদা আলাদা THRESHOLD (স্ক্যাল্পিংয়ের জন্য বেশি সংবেদনশীল করা হয়েছে)।
 - ম্যানুয়ালি Run workflow চাপলে সাথে সাথে স্ট্যাটাস মেসেজ আসে (বট ঠিক আছে কিনা যাচাই)।
 - প্রতিদিন সকাল ৯টায় (বাংলাদেশ) একটা "বট চালু আছে" রিপোর্ট আসে।
 """
@@ -16,7 +17,6 @@ import requests
 TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
-THRESHOLD = 3.0          # স্বাভাবিকের কত গুণ নড়লে ভোলাটাইল (কমালে বেশি অ্যালার্ট)
 LOOKBACK = 60            # তুলনার জন্য আগের কতগুলো ১-মিনিট ক্যান্ডেল
 RUN_SECONDS = 270        # এক রানে কতক্ষণ নজর রাখবে
 POLL_SECONDS = 30        # কত সেকেন্ড পরপর দেখবে
@@ -75,7 +75,13 @@ def btc_candles():
     return [(t, o, h, l, c) for t, l, h, o, c, _v in rows]
 
 
-MARKETS = {"গোল্ড (XAU)": gold_candles, "বিটকয়েন (BTC)": btc_candles}
+# প্রতিটা মার্কেটের নিজস্ব থ্রেশহোল্ড — BTC এমনিতেই বেশি ভোলাটাইল, তাই একটু বেশি রাখা হয়েছে।
+# স্ক্যাল্পিং সিগন্যাল কেমন আসে দেখার জন্য শুরুতে সংবেদনশীল (কম) মান দেওয়া হলো;
+# false alert বেশি মনে হলে ধীরে ধীরে বাড়িয়ে নিও।
+MARKETS = {
+    "গোল্ড (XAU)": {"fetch": gold_candles, "threshold": 1.8},
+    "বিটকয়েন (BTC)": {"fetch": btc_candles, "threshold": 2.0},
+}
 
 
 def analyse(candles):
@@ -127,15 +133,15 @@ def age_text(sec):
 
 def send_status(title):
     lines = [title]
-    for name, fetch in MARKETS.items():
+    for name, cfg in MARKETS.items():
         try:
-            info = analyse(fetch())
+            info = analyse(cfg["fetch"]())
             if not info:
                 lines.append(f"{name}: যথেষ্ট ডেটা নেই")
             else:
                 lines.append(
-                    f"{name}: ${info['price']:,.2f} | ভোলাটিলিটি {info['ratio']:.1f}x | "
-                    f"ডেটা {age_text(info['stale'])}"
+                    f"{name}: ${info['price']:,.2f} | ভোলাটিলিটি {info['ratio']:.1f}x "
+                    f"(থ্রেশহোল্ড {cfg['threshold']:.1f}x) | ডেটা {age_text(info['stale'])}"
                 )
         except Exception as e:  # noqa: BLE001
             lines.append(f"{name}: ডেটা আনতে ব্যর্থ ({type(e).__name__})")
@@ -155,9 +161,9 @@ def main():
     fetched_ok = {name: False for name in MARKETS}
 
     while True:
-        for name, fetch in MARKETS.items():
+        for name, cfg in MARKETS.items():
             try:
-                info = analyse(fetch())
+                info = analyse(cfg["fetch"]())
                 fetched_ok[name] = True
                 if not info:
                     print(f"{name}: যথেষ্ট ডেটা নেই")
@@ -165,7 +171,8 @@ def main():
                 print(f"{name}: অনুপাত {info['ratio']:.2f}, ডেটার বয়স {info['stale']:.0f}s")
                 if info["stale"] > MAX_STALE:
                     continue
-                if info["ratio"] >= THRESHOLD and time.time() - last_alert.get(name, 0) >= COOLDOWN:
+                threshold = cfg["threshold"]
+                if info["ratio"] >= threshold and time.time() - last_alert.get(name, 0) >= COOLDOWN:
                     send(
                         f"⚡ {name} এখন ভোলাটাইল!\n"
                         f"এই ১ মিনিটে নড়াচড়া স্বাভাবিকের {info['ratio']:.1f} গুণ (${info['move']:,.2f})\n"
