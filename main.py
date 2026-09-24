@@ -57,6 +57,7 @@ def gold_candles():
             "symbol": "XAU/USD",
             "interval": "1min",
             "outputsize": LOOKBACK + 5,
+            "timezone": "UTC",
             "apikey": TWELVE_DATA_KEY,
         },
     )
