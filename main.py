@@ -1,203 +1,186 @@
+"""গোল্ড আর বিটকয়েনের কারেন্ট ভোলাটিলিটি মাপার বট (স্ক্যাল্পিংয়ের জন্য ১ মিনিটের ক্যান্ডেল)।
+সাপোর্ট/রেজিস্টেন্স বা ট্রেড সিগন্যাল নেই, শুধু ভোলাটিলিটি অ্যালার্ট।
+
+- প্রতি রান ~৪.৫ মিনিট চলে, ৩০ সেকেন্ড পরপর দাম দেখে (GitHub Actions ৫ মিনিটে একবার চালায়)।
+- চলমান ১ মিনিটের ক্যান্ডেলের রেঞ্জ আগের ৬০ ক্যান্ডেলের গড় রেঞ্জের THRESHOLD গুণ ছাড়ালে মেসেজ।
+- ম্যানুয়ালি Run workflow চাপলে সাথে সাথে স্ট্যাটাস মেসেজ আসে (বট ঠিক আছে কিনা যাচাই)।
+- প্রতিদিন সকাল ৯টায় (বাংলাদেশ) একটা "বট চালু আছে" রিপোর্ট আসে।
+"""
+import datetime as dt
 import os
+import sys
+import time
+
 import requests
 
-TWELVE_DATA_API_KEY = os.environ["TWELVE_DATA_API_KEY"]
-TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
+TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
+CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
-# NOTE: "DIA" is used as the US30 (Dow Jones) symbol on Twelve Data.
-# Verify via https://api.twelvedata.com/symbol_search?symbol=US30
-# and change it below if needed.
-SYMBOLS = ["XAU/USD", "BTC/USD", "GBP/USD", "USD/JPY", "DIA"]
+THRESHOLD = 3.0          # স্বাভাবিকের কত গুণ নড়লে ভোলাটাইল (কমালে বেশি অ্যালার্ট)
+LOOKBACK = 60            # তুলনার জন্য আগের কতগুলো ১-মিনিট ক্যান্ডেল
+RUN_SECONDS = 270        # এক রানে কতক্ষণ নজর রাখবে
+POLL_SECONDS = 30        # কত সেকেন্ড পরপর দেখবে
+COOLDOWN = 300           # একই মার্কেটে দুই অ্যালার্টের মাঝে ন্যূনতম বিরতি (সেকেন্ড)
+MAX_STALE = 180          # ক্যান্ডেল এর চেয়ে পুরনো হলে (মার্কেট বন্ধ/ডেটা আটকে) অ্যালার্ট নয়
+GAP_RESET = 300          # ক্যান্ডেলের মাঝে এর চেয়ে বড় ফাঁক থাকলে (বিরতি/উইকএন্ড) গ্যাপকে নড়াচড়া ধরা হবে না
+HEARTBEAT_UTC_HOUR = 3   # ০৩:০০ UTC = সকাল ৯:০০ বাংলাদেশ
 
-INTERVAL = "15min"
-OUTPUT_SIZE = 50
-RSI_PERIOD = 14
-RSI_OVERBOUGHT = 70
-RSI_OVERSOLD = 30
-SR_LOOKBACK = 20        # candles to look back for support/resistance
-SR_TOUCH_PCT = 0.15     # % distance from a level that counts as "near"
-
-# --- Volatility alert settings ---
-VOLATILITY_LOOKBACK = 8     # candles to look back (8 x 15min = ~2 hours)
-VOLATILITY_THRESHOLD_PCT = 0.5   # % range vs current price that counts as "volatile"
+HEADERS = {"User-Agent": "Mozilla/5.0"}
 
 
-def fetch_candles(symbol):
-    url = "https://api.twelvedata.com/time_series"
-    params = {
-        "symbol": symbol,
-        "interval": INTERVAL,
-        "outputsize": OUTPUT_SIZE,
-        "apikey": TWELVE_DATA_API_KEY,
-    }
-    r = requests.get(url, params=params, timeout=15)
-    data = r.json()
-    if "values" not in data:
-        print(f"[{symbol}] API error: {data}")
+def get_json(url, params=None, tries=3):
+    err = None
+    for _ in range(tries):
+        try:
+            r = requests.get(url, params=params, headers=HEADERS, timeout=15)
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:  # noqa: BLE001
+            err = e
+            time.sleep(2)
+    raise err
+
+
+def gold_candles():
+    # COMEX গোল্ড ফিউচার্স (Yahoo): গোল্ডের প্রধান মূল্য-নির্ধারণী বাজার
+    last_err = None
+    for host in ("query1", "query2"):
+        try:
+            data = get_json(
+                f"https://{host}.finance.yahoo.com/v8/finance/chart/GC=F",
+                {"interval": "1m", "range": "2d"},
+                tries=2,
+            )
+            res = data["chart"]["result"][0]
+            q = res["indicators"]["quote"][0]
+            out = []
+            for i, t in enumerate(res["timestamp"]):
+                o, h, l, c = q["open"][i], q["high"][i], q["low"][i], q["close"][i]
+                if None in (o, h, l, c):
+                    continue
+                out.append((t, o, h, l, c))
+            return out
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+    raise last_err
+
+
+def btc_candles():
+    # Coinbase: নিয়ন্ত্রিত এক্সচেঞ্জ, সরাসরি ডেটা। ফরম্যাট: [time, low, high, open, close, volume]
+    rows = get_json(
+        "https://api.exchange.coinbase.com/products/BTC-USD/candles",
+        {"granularity": 60},
+    )
+    rows = sorted(rows, key=lambda x: x[0])
+    return [(t, o, h, l, c) for t, l, h, o, c, _v in rows]
+
+
+MARKETS = {"গোল্ড (XAU)": gold_candles, "বিটকয়েন (BTC)": btc_candles}
+
+
+def analyse(candles):
+    if len(candles) < LOOKBACK + 2:
         return None
-    candles = list(reversed(data["values"]))  # oldest -> newest
-    for c in candles:
-        for k in ("open", "high", "low", "close"):
-            c[k] = float(c[k])
-    return candles
-
-
-def compute_rsi(closes, period=RSI_PERIOD):
-    """Pure-Python RSI calculation — no external libraries needed."""
-    gains = []
-    losses = []
-    for i in range(1, len(closes)):
-        change = closes[i] - closes[i - 1]
-        if change > 0:
-            gains.append(change)
-            losses.append(0.0)
+    trs = []
+    for i in range(1, len(candles)):
+        t, _, h, l, _ = candles[i]
+        pt, pc = candles[i - 1][0], candles[i - 1][4]
+        if t - pt > GAP_RESET:      # বিরতির পর প্রথম ক্যান্ডেলে গ্যাপ গোনা হবে না
+            tr = h - l
         else:
-            gains.append(0.0)
-            losses.append(-change)
-
-    if len(gains) < period:
-        return 50.0  # not enough data yet, neutral RSI
-
-    avg_gain = sum(gains[:period]) / period
-    avg_loss = sum(losses[:period]) / period
-
-    for i in range(period, len(gains)):
-        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
-        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
-
-    if avg_loss == 0:
-        return 100.0
-    rs = avg_gain / avg_loss
-    return 100 - (100 / (1 + rs))
-
-
-def find_support_resistance(candles, lookback=SR_LOOKBACK):
-    recent = candles[-lookback:]
-    highs = [c["high"] for c in recent]
-    lows = [c["low"] for c in recent]
-    return max(highs), min(lows)
-
-
-def is_reversal_candle(candles):
-    """Simple bullish/bearish engulfing check on the last 2 candles."""
-    if len(candles) < 2:
+            tr = max(h - l, abs(h - pc), abs(l - pc))
+        trs.append(tr)
+    avg = sum(trs[-1 - LOOKBACK:-1]) / LOOKBACK
+    if avg <= 0:
         return None
-    prev, last = candles[-2], candles[-1]
-    bullish_engulf = (
-        prev["close"] < prev["open"]
-        and last["close"] > last["open"]
-        and last["close"] >= prev["open"]
-        and last["open"] <= prev["close"]
-    )
-    bearish_engulf = (
-        prev["close"] > prev["open"]
-        and last["close"] < last["open"]
-        and last["open"] >= prev["close"]
-        and last["close"] <= prev["open"]
-    )
-    if bullish_engulf:
-        return "bullish engulfing"
-    if bearish_engulf:
-        return "bearish engulfing"
-    return None
+    t, _, _, _, c = candles[-1]
+    return {
+        "ratio": trs[-1] / avg,
+        "move": trs[-1],
+        "price": c,
+        "stale": time.time() - t,
+    }
 
 
-def check_sr_proximity(price, resistance, support, pct=SR_TOUCH_PCT):
-    """
-    FIX: previously this checked resistance and support independently,
-    so a price sitting between two close-together levels (both within
-    pct%) triggered BOTH alerts at once (saw this on USD/JPY — price
-    was clearly closer to resistance but the tight S/R range meant the
-    support check also passed). Now only the nearer level fires, and
-    only if it's actually within pct%.
-    """
-    dist_to_resistance = abs(price - resistance) / resistance * 100
-    dist_to_support = abs(price - support) / support * 100
-
-    if dist_to_resistance <= pct and dist_to_resistance <= dist_to_support:
-        return f"রেজিস্ট্যান্সের কাছে ({resistance:.4f})"
-    if dist_to_support <= pct and dist_to_support <= dist_to_resistance:
-        return f"সাপোর্টের কাছে ({support:.4f})"
-    return None
+def send(text):
+    last_err = None
+    for _ in range(3):
+        try:
+            r = requests.post(
+                f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+                data={"chat_id": CHAT_ID, "text": text},
+                timeout=15,
+            )
+            r.raise_for_status()
+            return
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            time.sleep(2)
+    print(f"টেলিগ্রাম পাঠানো ব্যর্থ: {last_err}")
 
 
-def check_volatility(candles, lookback=VOLATILITY_LOOKBACK, threshold=VOLATILITY_THRESHOLD_PCT):
-    """New: flags a market as volatile/restless if its recent price range
-    is wide relative to the current price — same idea as the gold alert bot,
-    now applied to every scanned symbol."""
-    recent = candles[-lookback:]
-    high = max(c["high"] for c in recent)
-    low = min(c["low"] for c in recent)
-    price = candles[-1]["close"]
-    range_pct = (high - low) / price * 100
-    if range_pct >= threshold:
-        return range_pct, high, low
-    return None
+def age_text(sec):
+    if sec > MAX_STALE:
+        return f"⚠️ {sec / 60:.0f} মিনিট পুরনো (মার্কেট বন্ধ বা ডেটা দেরিতে)"
+    return f"তাজা ({sec:.0f} সেকেন্ড আগের)"
 
 
-def send_telegram(message):
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    requests.post(
-        url,
-        data={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"},
-        timeout=15,
-    )
-
-
-def scan_symbol(symbol):
-    candles = fetch_candles(symbol)
-    if not candles or len(candles) < RSI_PERIOD + 2:
-        return
-
-    closes = [c["close"] for c in candles]
-    price = closes[-1]
-    rsi = compute_rsi(closes)
-    resistance, support = find_support_resistance(candles)
-    reversal = is_reversal_candle(candles)
-    sr_alert = check_sr_proximity(price, resistance, support)
-
-    alerts = []
-    if rsi >= RSI_OVERBOUGHT:
-        alerts.append(f"RSI ওভারবট ({rsi:.1f})")
-    elif rsi <= RSI_OVERSOLD:
-        alerts.append(f"RSI ওভারসোল্ড ({rsi:.1f})")
-    if sr_alert:
-        alerts.append(sr_alert)
-    if reversal:
-        alerts.append(f"{reversal} ক্যান্ডেল")
-
-    if alerts:
-        msg = (
-            f"⚡ <b>{symbol}</b> ({INTERVAL})\n"
-            f"প্রাইস: {price:.4f}\n" + "\n".join(f"• {a}" for a in alerts)
-        )
-        send_telegram(msg)
-        print(f"[{symbol}] setup alert sent: {alerts}")
-    else:
-        print(f"[{symbol}] no setup signal. price={price:.4f} rsi={rsi:.1f}")
-
-    # --- Volatility alert (independent of the setup alerts above) ---
-    vol = check_volatility(candles)
-    if vol:
-        range_pct, high, low = vol
-        vol_msg = (
-            f"🔔 <b>{symbol} মার্কেট ভোলাটিলিটি অ্যালার্ট</b>\n\n"
-            f"বর্তমান দাম: {price:.4f}\n"
-            f"গত {VOLATILITY_LOOKBACK * 15 // 60} ঘণ্টার রেঞ্জ: {low:.4f} - {high:.4f}\n"
-            f"ভোলাটিলিটি: {range_pct:.3f}% (থ্রেশহোল্ড: {VOLATILITY_THRESHOLD_PCT}%)\n\n"
-            f"⚠️ মার্কেটে স্বাভাবিকের চেয়ে বেশি মুভমেন্ট হচ্ছে।"
-        )
-        send_telegram(vol_msg)
-        print(f"[{symbol}] volatility alert sent: {range_pct:.3f}%")
+def send_status(title):
+    lines = [title]
+    for name, fetch in MARKETS.items():
+        try:
+            info = analyse(fetch())
+            if not info:
+                lines.append(f"{name}: যথেষ্ট ডেটা নেই")
+            else:
+                lines.append(
+                    f"{name}: ${info['price']:,.2f} | ভোলাটিলিটি {info['ratio']:.1f}x | "
+                    f"ডেটা {age_text(info['stale'])}"
+                )
+        except Exception as e:  # noqa: BLE001
+            lines.append(f"{name}: ডেটা আনতে ব্যর্থ ({type(e).__name__})")
+    send("\n".join(lines))
 
 
 def main():
-    for symbol in SYMBOLS:
-        try:
-            scan_symbol(symbol)
-        except Exception as e:
-            print(f"[{symbol}] error: {e}")
+    now = dt.datetime.now(dt.timezone.utc)
+    event = os.getenv("GITHUB_EVENT_NAME", "")
+    if event == "workflow_dispatch":
+        send_status("✅ টেস্ট: বট চালু আছে")
+    elif now.hour == HEARTBEAT_UTC_HOUR and now.minute < 5:
+        send_status("✅ বট চালু আছে (দৈনিক রিপোর্ট)")
+
+    end = time.time() + RUN_SECONDS
+    last_alert = {}
+    fetched_ok = {name: False for name in MARKETS}
+
+    while True:
+        for name, fetch in MARKETS.items():
+            try:
+                info = analyse(fetch())
+                fetched_ok[name] = True
+                if not info:
+                    print(f"{name}: যথেষ্ট ডেটা নেই")
+                    continue
+                print(f"{name}: অনুপাত {info['ratio']:.2f}, ডেটার বয়স {info['stale']:.0f}s")
+                if info["stale"] > MAX_STALE:
+                    continue
+                if info["ratio"] >= THRESHOLD and time.time() - last_alert.get(name, 0) >= COOLDOWN:
+                    send(
+                        f"⚡ {name} এখন ভোলাটাইল!\n"
+                        f"এই ১ মিনিটে নড়াচড়া স্বাভাবিকের {info['ratio']:.1f} গুণ (${info['move']:,.2f})\n"
+                        f"দাম: ${info['price']:,.2f}"
+                    )
+                    last_alert[name] = time.time()
+            except Exception as e:  # noqa: BLE001
+                print(f"{name}: ত্রুটি - {e}")
+        if time.time() + POLL_SECONDS >= end:
+            break
+        time.sleep(POLL_SECONDS)
+
+    if not all(fetched_ok.values()):
+        # পুরো রানে কোনো মার্কেটের ডেটা একবারও না এলে Actions লাল দেখাবে
+        sys.exit(1)
 
 
 if __name__ == "__main__":
