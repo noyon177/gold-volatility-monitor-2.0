@@ -1,4 +1,4 @@
-name: Volatility Alert
+name: Gold and BTC Volatility Monitor
 
 on:
   schedule:
@@ -9,21 +9,43 @@ permissions:
   contents: read
 
 concurrency:
-  group: volatility
+  group: volatility-monitor
   cancel-in-progress: false
 
 jobs:
-  run:
+  monitor:
     runs-on: ubuntu-latest
-    timeout-minutes: 7
+    timeout-minutes: 8
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install requests
-      - run: python main.py
+
+      - name: Install dependencies
+        run: pip install requests
+
+      # à¦†à¦—à§‡à¦° à¦°à¦¾à¦¨à§‡à¦° à¦¸à§à¦Ÿà§‡à¦Ÿ (cooldown, à¦²à§‡à¦­à§‡à¦², à¦¡à§‡à¦Ÿà¦¾-à¦¡à¦¾à¦‰à¦¨ à¦•à¦¾à¦‰à¦¨à§à¦Ÿà¦¾à¦°) à¦«à¦¿à¦°à¦¿à¦¯à¦¼à§‡ à¦†à¦¨à§‡
+      - name: Restore state
+        uses: actions/cache/restore@v4
+        with:
+          path: state.json
+          key: state-${{ github.run_id }}
+          restore-keys: |
+            state-
+
+      - name: Run monitor
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TWELVE_DATA_API_KEY: ${{ secrets.TWELVE_DATA_API_KEY }}
+        run: python main.py
+
+      # à¦°à¦¾à¦¨ à¦«à§‡à¦² à¦•à¦°à¦²à§‡à¦“ à¦¸à§à¦Ÿà§‡à¦Ÿ à¦¸à§‡à¦­ à¦¹à¦¬à§‡
+      - name: Save state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: state.json
+          key: state-${{ github.run_id }}
