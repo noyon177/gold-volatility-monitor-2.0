@@ -1,0 +1,24 @@
+name: Swing Backtest
+
+on:
+  workflow_dispatch: {}   # শুধু ম্যানুয়ালি "Run workflow" চাপলে চলবে, অটো শিডিউল নেই
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run backtest
+        env:
+          TWELVE_DATA_API_KEY: ${{ secrets.TWELVE_DATA_API_KEY }}
+        run: python backtest_swing.py
