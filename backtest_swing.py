@@ -1,13 +1,9 @@
-"""সুইং সিগন্যাল ব্যাকটেস্ট — swing_bot.py-এর ঠিক একই লজিক অতীতের ডেটার উপর চালিয়ে দেখায়:
-- অতীতে কবে কবে (EMA9/15 ক্রসওভার + লিকুইডিটি সুইপ + ADX কনফার্মেশন + 1D bias) মিলেছিল
-- সেই সিগন্যালের পরে ১ দিন, ৩ দিন, ৫ দিন পর দাম কোন দিকে কতটা মুভ করেছে
-- মোট কতগুলো সিগন্যাল, তার মধ্যে কতগুলো সঠিক দিকে গিয়েছে (win rate)
+"""EMA/RSI regime সিগন্যাল + ATR-ভিত্তিক SL/TP-এর বাস্তবসম্মত ব্যাকটেস্ট।
 
-এটা GitHub Actions-এ চালানোর দরকার নেই — নিজের কম্পিউটারে বা যেকোনো জায়গায় একবার রান করলেই হবে:
-    TWELVE_DATA_API_KEY=xxxx python backtest_swing.py
+প্রতিটা সিগন্যালের পরে ক্যান্ডেল বাই ক্যান্ডেল এগিয়ে দেখা হয় দাম আগে SL-এ পৌঁছায়
+নাকি TP-তে — তার ভিত্তিতে আসল লাভ/লস হিসাব করা হয় (ফিক্সড % এর বদলে)।
 
-শুধু TWELVE_DATA_API_KEY লাগবে (টেলিগ্রাম টোকেন লাগবে না, কারণ এটা কোনো মেসেজ পাঠায় না,
-শুধু ফলাফল টার্মিনালে প্রিন্ট করে)।
+চালানোর নিয়ম: TWELVE_DATA_API_KEY=xxxx python backtest_swing.py
 """
 import datetime as dt
 import os
@@ -17,20 +13,18 @@ import requests
 
 TWELVE_DATA_KEY = os.environ["TWELVE_DATA_API_KEY"]
 
-# ---------------- সেটিংস (swing_bot.py-এর সাথে হুবহু মিলিয়ে রাখা হয়েছে) ----------------
 EMA_FAST = 9
 EMA_SLOW = 15
 ADX_PERIOD = 14
-ADX_THRESHOLD = 18
-SWEEP_LOOKBACK = 10
-SWEEP_WINDOW = 3
-
-# ব্যাকটেস্টের জন্য কত ইতিহাস আনা হবে
-OUTPUT_4H = 2200   # ~2200 x 4h ≈ ৩৬৬ দিন (১ বছর)
-OUTPUT_1D = 420    # ~৪২০ দিন (১ বছর + বাফার, যাতে শুরুর দিকের সিগন্যালেও 1D bias হিসাব করা যায়)
-
-# সিগন্যালের পরে কত ক্যান্ডেল/দিন পর ফলাফল চেক করা হবে
-FORWARD_4H_CHECKS = {"১ দিন": 6, "৩ দিন": 18, "৫ দিন": 30}
+ADX_THRESHOLD = 22
+RSI_PERIOD = 14
+RSI_OVERSOLD = 30
+RSI_OVERBOUGHT = 70
+ATR_PERIOD = 14
+SL_ATR_MULT = 1.5
+TP_ATR_MULT = 3.0
+MAX_HOLD_CANDLES = 60       # সর্বোচ্চ কতগুলো 4H ক্যান্ডেল (~10 দিন) ধরে ট্রেড খোলা রাখা হবে
+OUTPUT_4H = 2200            # ~১ বছর
 
 MARKETS = {
     "XAUUSD": {"name": "গোল্ড (XAU/USD)", "symbol": "XAU/USD"},
@@ -81,7 +75,6 @@ def fetch_candles(symbol, interval, outputsize):
     return out
 
 
-# ---------------- ইন্ডিকেটর (swing_bot.py থেকে হুবহু) ----------------
 def ema_series(closes, period):
     n = len(closes)
     if n < period:
@@ -96,7 +89,7 @@ def ema_series(closes, period):
     return out
 
 
-def wilder_smooth(values, period):
+def wilder_smooth_sum(values, period):
     n = len(values)
     out = [None] * n
     if n < period:
@@ -107,36 +100,57 @@ def wilder_smooth(values, period):
     return out
 
 
-def calc_adx(candles, period=ADX_PERIOD):
+def wilder_avg(values, period):
+    n = len(values)
+    out = [None] * n
+    if n <= period:
+        return out
+    out[period] = sum(values[1:period + 1]) / period
+    for i in range(period + 1, n):
+        out[i] = (out[i - 1] * (period - 1) + values[i]) / period
+    return out
+
+
+def true_range_series(candles):
     n = len(candles)
     highs = [c[2] for c in candles]
     lows = [c[3] for c in candles]
     closes = [c[4] for c in candles]
+    tr = [0.0] * n
+    for i in range(1, n):
+        tr[i] = max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1]))
+    return tr
 
+
+def calc_atr(candles, period=ATR_PERIOD):
+    return wilder_avg(true_range_series(candles), period)
+
+
+def calc_adx(candles, period=ADX_PERIOD):
+    n = len(candles)
+    highs = [c[2] for c in candles]
+    lows = [c[3] for c in candles]
     plus_dm = [0.0] * n
     minus_dm = [0.0] * n
-    tr = [0.0] * n
+    tr = true_range_series(candles)
     for i in range(1, n):
         up = highs[i] - highs[i - 1]
         down = lows[i - 1] - lows[i]
         plus_dm[i] = up if (up > down and up > 0) else 0.0
         minus_dm[i] = down if (down > up and down > 0) else 0.0
-        tr[i] = max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1]))
 
-    s_tr = wilder_smooth(tr, period)
-    s_plus = wilder_smooth(plus_dm, period)
-    s_minus = wilder_smooth(minus_dm, period)
+    s_tr = wilder_smooth_sum(tr, period)
+    s_plus = wilder_smooth_sum(plus_dm, period)
+    s_minus = wilder_smooth_sum(minus_dm, period)
 
-    plus_di = [None] * n
-    minus_di = [None] * n
     dx = [None] * n
     for i in range(n):
         if s_tr[i]:
-            plus_di[i] = 100 * s_plus[i] / s_tr[i]
-            minus_di[i] = 100 * s_minus[i] / s_tr[i]
-            denom = plus_di[i] + minus_di[i]
+            pdi = 100 * s_plus[i] / s_tr[i]
+            mdi = 100 * s_minus[i] / s_tr[i]
+            denom = pdi + mdi
             if denom > 0:
-                dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / denom
+                dx[i] = 100 * abs(pdi - mdi) / denom
 
     adx = [None] * n
     valid = [i for i in range(n) if dx[i] is not None]
@@ -147,10 +161,29 @@ def calc_adx(candles, period=ADX_PERIOD):
             if dx[i] is None:
                 continue
             adx[i] = (adx[i - 1] * (period - 1) + dx[i]) / period
-    return plus_di, minus_di, adx
+    return adx
 
 
-def crossover_direction(ema_fast, ema_slow, idx):
+def calc_rsi(closes, period=RSI_PERIOD):
+    n = len(closes)
+    gains = [0.0] * n
+    losses = [0.0] * n
+    for i in range(1, n):
+        change = closes[i] - closes[i - 1]
+        gains[i] = change if change > 0 else 0.0
+        losses[i] = -change if change < 0 else 0.0
+    avg_gain = wilder_avg(gains, period)
+    avg_loss = wilder_avg(losses, period)
+    rsi = [None] * n
+    for i in range(n):
+        ag, al = avg_gain[i], avg_loss[i]
+        if ag is None or al is None:
+            continue
+        rsi[i] = 100.0 if al == 0 else 100 - 100 / (1 + ag / al)
+    return rsi
+
+
+def ema_crossover(ema_fast, ema_slow, idx):
     if idx < 1:
         return None
     f0, f1 = ema_fast[idx - 1], ema_fast[idx]
@@ -164,122 +197,141 @@ def crossover_direction(ema_fast, ema_slow, idx):
     return None
 
 
-def liquidity_sweep(candles, idx, direction, lookback=SWEEP_LOOKBACK):
-    start = max(0, idx - lookback)
-    window = candles[start:idx]
-    if len(window) < max(3, lookback // 2):
-        return False
-    cur_low, cur_high, cur_close = candles[idx][3], candles[idx][2], candles[idx][4]
-    if direction == "bull":
-        recent_low = min(c[3] for c in window)
-        return cur_low < recent_low and cur_close > recent_low
-    recent_high = max(c[2] for c in window)
-    return cur_high > recent_high and cur_close < recent_high
+def rsi_reversal(rsi, idx):
+    if idx < 1:
+        return None
+    r0, r1 = rsi[idx - 1], rsi[idx]
+    if r0 is None or r1 is None:
+        return None
+    if r0 < RSI_OVERSOLD <= r1:
+        return "bull"
+    if r0 > RSI_OVERBOUGHT >= r1:
+        return "bear"
+    return None
 
 
-def liquidity_sweep_recent(candles, idx, direction, lookback=SWEEP_LOOKBACK, window=SWEEP_WINDOW):
-    for j in range(max(0, idx - window + 1), idx + 1):
-        if liquidity_sweep(candles, j, direction, lookback):
-            return True
-    return False
-
-
-def find_daily_idx(c1, t):
-    """t সময়ের আগে সম্পূর্ণ ক্লোজড শেষ ডেইলি ক্যান্ডেলের ইনডেক্স (ফরওয়ার্ড-লিকিং এড়াতে)।"""
-    idx = None
-    for j, c in enumerate(c1):
-        if c[0] + 86400 <= t:
-            idx = j
+def simulate_exit(c4, idx, direction, entry, sl, tp, max_hold=MAX_HOLD_CANDLES):
+    """entry-এর পরের ক্যান্ডেলগুলো ধরে দেখে আগে SL না TP হিট হয়। একই ক্যান্ডেলে দুটোই
+    সম্ভব হলে রক্ষণাত্মকভাবে (worst case) SL হিট ধরা হয়।"""
+    end = min(idx + max_hold, len(c4) - 1)
+    for j in range(idx + 1, end + 1):
+        hi, lo = c4[j][2], c4[j][3]
+        if direction == "bull":
+            hit_sl = lo <= sl
+            hit_tp = hi >= tp
         else:
-            break
-    return idx
+            hit_sl = hi >= sl
+            hit_tp = lo <= tp
+        if hit_sl:
+            return "SL", sl, j - idx
+        if hit_tp:
+            return "TP", tp, j - idx
+    exit_price = c4[end][4]
+    return "TIMEOUT", exit_price, end - idx
 
 
-# ---------------- ব্যাকটেস্ট ----------------
+def trade_return_pct(direction, entry, exit_price):
+    raw = (exit_price - entry) / entry * 100
+    return raw if direction == "bull" else -raw
+
+
 def backtest_market(key, cfg):
     name = cfg["name"]
     print(f"\n{'=' * 60}\n{name} — ডেটা আনা হচ্ছে...")
     c4 = fetch_candles(cfg["symbol"], "4h", OUTPUT_4H)
-    c1 = fetch_candles(cfg["symbol"], "1day", OUTPUT_1D)
-    print(f"{name}: {len(c4)}টা 4H ক্যান্ডেল, {len(c1)}টা 1D ক্যান্ডেল পাওয়া গেছে")
+    print(f"{name}: {len(c4)}টা 4H ক্যান্ডেল পাওয়া গেছে")
 
-    closes4 = [c[4] for c in c4]
-    ema9_4 = ema_series(closes4, EMA_FAST)
-    ema15_4 = ema_series(closes4, EMA_SLOW)
-    plus_di4, minus_di4, adx4 = calc_adx(c4, ADX_PERIOD)
+    closes = [c[4] for c in c4]
+    ema9 = ema_series(closes, EMA_FAST)
+    ema15 = ema_series(closes, EMA_SLOW)
+    adx = calc_adx(c4, ADX_PERIOD)
+    rsi = calc_rsi(closes, RSI_PERIOD)
+    atr = calc_atr(c4, ATR_PERIOD)
 
-    closes1 = [c[4] for c in c1]
-    ema9_1 = ema_series(closes1, EMA_FAST)
-    ema15_1 = ema_series(closes1, EMA_SLOW)
+    warmup = max(EMA_SLOW, ADX_PERIOD, RSI_PERIOD, ATR_PERIOD) + 10
+    trades = []
 
-    max_forward = max(FORWARD_4H_CHECKS.values())
-    signals = []
-
-    for idx in range(EMA_SLOW + ADX_PERIOD, len(c4) - max_forward):
-        direction = crossover_direction(ema9_4, ema15_4, idx)
+    for idx in range(warmup, len(c4) - MAX_HOLD_CANDLES):
+        if adx[idx] is None or atr[idx] is None:
+            continue
+        if adx[idx] >= ADX_THRESHOLD:
+            regime = "ট্রেন্ডিং (EMA)"
+            direction = ema_crossover(ema9, ema15, idx)
+        else:
+            regime = "রেঞ্জিং (RSI)"
+            direction = rsi_reversal(rsi, idx)
         if not direction:
             continue
-        if adx4[idx] is None or adx4[idx] < ADX_THRESHOLD:
-            continue
-        if plus_di4[idx] is None or minus_di4[idx] is None:
-            continue
-        if direction == "bull" and not (plus_di4[idx] > minus_di4[idx]):
-            continue
-        if direction == "bear" and not (minus_di4[idx] > plus_di4[idx]):
-            continue
-        if not liquidity_sweep_recent(c4, idx, direction):
-            continue
 
-        idx1 = find_daily_idx(c1, c4[idx][0])
-        if idx1 is None or ema9_1[idx1] is None or ema15_1[idx1] is None:
-            continue
-        daily_bull = ema9_1[idx1] > ema15_1[idx1]
-        if direction == "bull" and not daily_bull:
-            continue
-        if direction == "bear" and daily_bull:
-            continue
+        entry = c4[idx][4]
+        atr_val = atr[idx]
+        if direction == "bull":
+            sl = entry - SL_ATR_MULT * atr_val
+            tp = entry + TP_ATR_MULT * atr_val
+        else:
+            sl = entry + SL_ATR_MULT * atr_val
+            tp = entry - TP_ATR_MULT * atr_val
 
-        entry_price = c4[idx][4]
+        outcome, exit_price, bars = simulate_exit(c4, idx, direction, entry, sl, tp)
+        ret = trade_return_pct(direction, entry, exit_price)
         entry_time = dt.datetime.fromtimestamp(c4[idx][0], tz=dt.timezone.utc)
-        forward = {}
-        for label, n_candles in FORWARD_4H_CHECKS.items():
-            future_price = c4[idx + n_candles][4]
-            pct = (future_price - entry_price) / entry_price * 100
-            forward[label] = pct
 
-        signals.append(
-            {"time": entry_time, "direction": direction, "price": entry_price, "forward": forward}
+        trades.append(
+            {"time": entry_time, "direction": direction, "regime": regime,
+             "entry": entry, "outcome": outcome, "ret": ret, "bars": bars}
         )
 
-    print(f"{name}: মোট {len(signals)}টা সিগন্যাল পাওয়া গেছে (গত ~{OUTPUT_4H * 4 // 24} দিনে)\n")
-    for s in signals:
-        arrow = "🟢 বাই" if s["direction"] == "bull" else "🔴 সেল"
-        fwd_str = " | ".join(f"{label}: {pct:+.2f}%" for label, pct in s["forward"].items())
-        print(f"  {s['time'].strftime('%Y-%m-%d %H:%M')} UTC — {arrow} @ {s['price']:,.4f} — {fwd_str}")
+    days = OUTPUT_4H * 4 // 24
+    print(f"{name}: মোট {len(trades)}টা ট্রেড (গত ~{days} দিনে)\n")
+    for t in trades:
+        arrow = "🟢 বাই" if t["direction"] == "bull" else "🔴 সেল"
+        hold_hours = t["bars"] * 4
+        print(
+            f"  {t['time'].strftime('%Y-%m-%d %H:%M')} UTC — {arrow} [{t['regime']}] "
+            f"@ {t['entry']:,.4f} — {t['outcome']} — রিটার্ন: {t['ret']:+.2f}% "
+            f"({hold_hours}h পরে)"
+        )
 
-    # win rate: bull হলে + হওয়া উচিত, bear হলে - হওয়া উচিত (৩ দিনের চেক দিয়ে ধরা হলো)
-    if signals:
-        wins = 0
-        for s in signals:
-            pct = s["forward"]["৩ দিন"]
-            if (s["direction"] == "bull" and pct > 0) or (s["direction"] == "bear" and pct < 0):
-                wins += 1
-        print(f"\n  ৩-দিনের হিসেবে win rate: {wins}/{len(signals)} ({wins / len(signals) * 100:.0f}%)")
-    return signals
+    if trades:
+        wins = [t for t in trades if t["ret"] > 0]
+        losses = [t for t in trades if t["ret"] <= 0]
+        total_ret = sum(t["ret"] for t in trades)
+        avg_ret = total_ret / len(trades)
+        win_rate = len(wins) / len(trades) * 100
+        sl_count = sum(1 for t in trades if t["outcome"] == "SL")
+        tp_count = sum(1 for t in trades if t["outcome"] == "TP")
+        timeout_count = sum(1 for t in trades if t["outcome"] == "TIMEOUT")
+
+        print(f"\n  মোট ট্রেড: {len(trades)} | Win rate: {len(wins)}/{len(trades)} ({win_rate:.0f}%)")
+        print(f"  TP হিট: {tp_count} | SL হিট: {sl_count} | Timeout: {timeout_count}")
+        print(f"  গড় রিটার্ন/ট্রেড: {avg_ret:+.2f}% | সব ট্রেড যোগ করলে মোট: {total_ret:+.2f}%")
+
+        for label, subset in [("ট্রেন্ডিং (EMA)", [t for t in trades if "ট্রেন্ডিং" in t["regime"]]),
+                               ("রেঞ্জিং (RSI)", [t for t in trades if "রেঞ্জিং" in t["regime"]])]:
+            if subset:
+                w = sum(1 for t in subset if t["ret"] > 0)
+                avg = sum(t["ret"] for t in subset) / len(subset)
+                print(f"  শুধু {label}: {w}/{len(subset)} win ({w / len(subset) * 100:.0f}%), গড় রিটার্ন {avg:+.2f}%")
+    return trades
 
 
 def main():
-    all_signals = {}
+    all_trades = {}
     for key, cfg in MARKETS.items():
         try:
-            all_signals[key] = backtest_market(key, cfg)
+            all_trades[key] = backtest_market(key, cfg)
         except Exception as e:  # noqa: BLE001
             print(f"{cfg['name']}: ত্রুটি - {e}")
 
     print(f"\n{'=' * 60}\nসারসংক্ষেপ")
     for key, cfg in MARKETS.items():
-        n = len(all_signals.get(key, []))
-        print(f"  {cfg['name']}: {n}টা সিগন্যাল")
+        trades = all_trades.get(key, [])
+        if not trades:
+            print(f"  {cfg['name']}: 0টা ট্রেড")
+            continue
+        wins = sum(1 for t in trades if t["ret"] > 0)
+        total = sum(t["ret"] for t in trades)
+        print(f"  {cfg['name']}: {len(trades)}টা ট্রেড, win rate {wins}/{len(trades)}, মোট রিটার্ন {total:+.2f}%")
 
 
 if __name__ == "__main__":
