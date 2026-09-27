@@ -1,1 +1,24 @@
+name: Swing Backtest
 
+on:
+  workflow_dispatch: {}   # à¦¶à§à¦§à§ à¦®à§à¦¯à¦¾à¦¨à§à¦¯à¦¼à¦¾à¦²à¦¿ "Run workflow" à¦šà¦¾à¦ªà¦²à§‡ à¦šà¦²à¦¬à§‡, à¦…à¦Ÿà§‹ à¦¶à¦¿à¦¡à¦¿à¦‰à¦² à¦¨à§‡à¦‡
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run backtest
+        env:
+          TWELVE_DATA_API_KEY: ${{ secrets.TWELVE_DATA_API_KEY }}
+        run: python backtest_swing.py
