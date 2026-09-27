@@ -46,8 +46,8 @@ TWELVE_DATA_KEY = os.environ["TWELVE_DATA_API_KEY"]
 CANDLE_INTERVAL = "1day"
 OUTPUT_SIZE = 2500
 
-EMA_FAST = 20
-EMA_SLOW = 50
+EMA_FAST = 9
+EMA_SLOW = 15
 TREND_SLOPE_LOOKBACK = 10     # এই কয়টা ক্যান্ডেল আগের তুলনায় EMA_FAST-এর ঢাল দেখে ট্রেন্ড ঠিক হয়
 
 RSI_PERIOD = 14
@@ -62,12 +62,10 @@ RANGE_SL_BUFFER_PCT = 0.3     # রেঞ্জ ট্রেডে সুইং 
 MAX_HOLD_CANDLES = 40
 
 ROUND_TRIP_COST_PCT = {
-    "XAUUSD": 0.10,
     "BTCUSD": 0.05,
 }
 
 MARKETS = {
-    "XAUUSD": {"name": "গোল্ড (XAU/USD)", "symbol": "XAU/USD"},
     "BTCUSD": {"name": "বিটকয়েন (BTC/USD)", "symbol": "BTC/USD"},
 }
 
