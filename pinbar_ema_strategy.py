@@ -13,6 +13,10 @@ Strategy rules (15-minute candles):
         BUY  -> SL below the pinbar low
         SELL -> SL above the pinbar high
   - Take Profit  : Risk:Reward = 1:2 (TP distance = 2x SL distance)
+  - Volatility filter : SL distance must be >= 0.5x ATR(14), otherwise the
+    signal is skipped (protects against unrealistically tight stops)
+  - Heartbeat    : sends a "bot is alive" message with current prices every
+    HEARTBEAT_INTERVAL_MINUTES, even when there is no trade signal
 
 Data source : Twelve Data (unified endpoint for both XAU/USD and BTC/USD)
 Alert       : Telegram Bot
@@ -27,6 +31,7 @@ Run this on a schedule (e.g. every 15 minutes) via GitHub Actions cron.
 
 import os
 import json
+import datetime
 import requests
 
 # ---------------------------------------------------------------------------
@@ -41,13 +46,17 @@ SYMBOLS = [
 INTERVAL = "15min"
 EMA_FAST = 9
 EMA_SLOW = 15
-CANDLES_NEEDED = 60          # enough history for stable EMA15
+ATR_PERIOD = 14
+CANDLES_NEEDED = 60          # enough history for stable EMA15 / ATR14
 PINBAR_WICK_RATIO = 2.0      # dominant wick must be >= 2x the body
 PINBAR_NOSE_MAX_RATIO = 0.4  # opposite wick must be small vs the body
 EMA_TOUCH_TOLERANCE_PCT = 0.15  # how close (%) price must get to EMA15 to count as a "touch"
 RISK_REWARD = 2.0
+MIN_SL_ATR_MULTIPLIER = 0.5  # SL distance must be >= 0.5x ATR14, else signal is skipped (too tight/noisy)
 
-STATE_FILE = "last_signal_state.json"  # remembers last alerted candle per symbol
+HEARTBEAT_INTERVAL_MINUTES = 60  # send an "I'm alive" message this often
+
+STATE_FILE = "last_signal_state.json"  # remembers last alerted candle per symbol, and last heartbeat time
 
 TWELVE_DATA_API_KEY = os.environ.get("TWELVE_DATA_API_KEY")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -100,6 +109,26 @@ def ema_series(closes, period):
     return ema
 
 
+def atr_series(candles, period):
+    """Average True Range, aligned with `candles` (None where not enough data)."""
+    trs = [None] * len(candles)
+    for i in range(len(candles)):
+        h, l = candles[i]["high"], candles[i]["low"]
+        if i == 0:
+            trs[i] = h - l
+        else:
+            prev_close = candles[i - 1]["close"]
+            trs[i] = max(h - l, abs(h - prev_close), abs(l - prev_close))
+
+    atr = [None] * len(candles)
+    if len(candles) < period:
+        return atr
+    atr[period - 1] = sum(trs[:period]) / period
+    for i in range(period, len(candles)):
+        atr[i] = (atr[i - 1] * (period - 1) + trs[i]) / period
+    return atr
+
+
 # ---------------------------------------------------------------------------
 # Pinbar detection
 # ---------------------------------------------------------------------------
@@ -141,9 +170,10 @@ def check_signal(candles):
     closes = [c["close"] for c in candles]
     ema9 = ema_series(closes, EMA_FAST)
     ema15 = ema_series(closes, EMA_SLOW)
+    atr = atr_series(candles, ATR_PERIOD)
 
     i = len(candles) - 1  # last CLOSED candle
-    if ema9[i] is None or ema15[i] is None:
+    if ema9[i] is None or ema15[i] is None or atr[i] is None:
         return None
 
     candle = candles[i]
@@ -156,27 +186,29 @@ def check_signal(candles):
     if not touches_ema(candle, ema15[i]):
         return None
 
+    min_sl_distance = MIN_SL_ATR_MULTIPLIER * atr[i]
+
     if pinbar_type == "bullish" and trend_up:
         entry = candle["close"]
         sl = candle["low"]
         risk = entry - sl
-        if risk <= 0:
-            return None
+        if risk <= 0 or risk < min_sl_distance:
+            return None  # SL too tight relative to current volatility -> skip
         tp = entry + RISK_REWARD * risk
         return {"side": "BUY", "entry": entry, "sl": sl, "tp": tp,
                 "time": candle["time"], "candle": candle,
-                "ema9": ema9[i], "ema15": ema15[i]}
+                "ema9": ema9[i], "ema15": ema15[i], "atr": atr[i]}
 
     if pinbar_type == "bearish" and trend_down:
         entry = candle["close"]
         sl = candle["high"]
         risk = sl - entry
-        if risk <= 0:
-            return None
+        if risk <= 0 or risk < min_sl_distance:
+            return None  # SL too tight relative to current volatility -> skip
         tp = entry - RISK_REWARD * risk
         return {"side": "SELL", "entry": entry, "sl": sl, "tp": tp,
                 "time": candle["time"], "candle": candle,
-                "ema9": ema9[i], "ema15": ema15[i]}
+                "ema9": ema9[i], "ema15": ema15[i], "atr": atr[i]}
 
     return None
 
@@ -210,11 +242,36 @@ def save_state(state):
 
 
 # ---------------------------------------------------------------------------
+# Heartbeat ("bot is alive") message
+# ---------------------------------------------------------------------------
+
+def should_send_heartbeat(state):
+    last = state.get("_last_heartbeat")
+    if not last:
+        return True
+    last_time = datetime.datetime.fromisoformat(last)
+    elapsed_minutes = (datetime.datetime.utcnow() - last_time).total_seconds() / 60
+    return elapsed_minutes >= HEARTBEAT_INTERVAL_MINUTES
+
+
+def send_heartbeat(prices):
+    now = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    lines = [f"✅ <b>বট চালু আছে</b> ({now})"]
+    for name, price in prices.items():
+        if price is not None:
+            lines.append(f"{name}: {price:.3f}")
+        else:
+            lines.append(f"{name}: ডেটা আনতে ব্যর্থ")
+    send_telegram("\n".join(lines))
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 def main():
     state = load_state()
+    last_prices = {}
 
     for sym in SYMBOLS:
         name = sym["name"]
@@ -222,7 +279,10 @@ def main():
             candles = get_candles(sym["td_symbol"])
         except Exception as e:
             print(f"[{name}] fetch error: {e}")
+            last_prices[name] = None
             continue
+
+        last_prices[name] = candles[-1]["close"]
 
         signal = check_signal(candles)
         if not signal:
@@ -247,6 +307,7 @@ def main():
             f"O: {ohlc['open']:.3f}  H: {ohlc['high']:.3f}\n"
             f"L: {ohlc['low']:.3f}  C: {ohlc['close']:.3f}\n"
             f"EMA9: {signal['ema9']:.3f}  EMA15: {signal['ema15']:.3f}\n"
+            f"ATR(14): {signal['atr']:.3f}\n"
             f"<i>(data source: Twelve Data — may differ slightly from your broker feed)</i>"
         )
         send_telegram(msg)
@@ -254,8 +315,13 @@ def main():
 
         state[name] = signal["time"]
 
+    if should_send_heartbeat(state):
+        send_heartbeat(last_prices)
+        state["_last_heartbeat"] = datetime.datetime.utcnow().isoformat()
+
     save_state(state)
 
 
 if __name__ == "__main__":
     main()
+      
