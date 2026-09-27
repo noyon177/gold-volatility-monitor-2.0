@@ -164,7 +164,8 @@ def check_signal(candles):
             return None
         tp = entry + RISK_REWARD * risk
         return {"side": "BUY", "entry": entry, "sl": sl, "tp": tp,
-                "time": candle["time"]}
+                "time": candle["time"], "candle": candle,
+                "ema9": ema9[i], "ema15": ema15[i]}
 
     if pinbar_type == "bearish" and trend_down:
         entry = candle["close"]
@@ -174,7 +175,8 @@ def check_signal(candles):
             return None
         tp = entry - RISK_REWARD * risk
         return {"side": "SELL", "entry": entry, "sl": sl, "tp": tp,
-                "time": candle["time"]}
+                "time": candle["time"], "candle": candle,
+                "ema9": ema9[i], "ema15": ema15[i]}
 
     return None
 
@@ -232,13 +234,20 @@ def main():
             print(f"[{name}] signal already sent for {signal['time']}")
             continue
 
+        ohlc = signal["candle"]
         msg = (
             f"📢 <b>{signal['side']} SIGNAL — {name}</b>\n"
             f"Timeframe: 15M | Pinbar + EMA15 rejection\n"
             f"Entry: {signal['entry']:.3f}\n"
             f"SL: {signal['sl']:.3f}\n"
             f"TP: {signal['tp']:.3f}  (1:{RISK_REWARD:.0f} R:R)\n"
-            f"Candle time: {signal['time']}"
+            f"Candle time: {signal['time']}\n"
+            f"\n"
+            f"<i>Verify against your own chart:</i>\n"
+            f"O: {ohlc['open']:.3f}  H: {ohlc['high']:.3f}\n"
+            f"L: {ohlc['low']:.3f}  C: {ohlc['close']:.3f}\n"
+            f"EMA9: {signal['ema9']:.3f}  EMA15: {signal['ema15']:.3f}\n"
+            f"<i>(data source: Twelve Data — may differ slightly from your broker feed)</i>"
         )
         send_telegram(msg)
         print(f"[{name}] SIGNAL SENT: {signal}")
