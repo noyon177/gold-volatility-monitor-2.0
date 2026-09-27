@@ -1,7 +1,7 @@
 name: Swing Backtest
 
 on:
-  workflow_dispatch: {}   # à¦¶à§à¦§à§ à¦®à§à¦¯à¦¾à¦¨à§à¦¯à¦¼à¦¾à¦²à¦¿ "Run workflow" à¦šà¦¾à¦ªà¦²à§‡ à¦šà¦²à¦¬à§‡, à¦…à¦Ÿà§‹ à¦¶à¦¿à¦¡à¦¿à¦‰à¦² à¦¨à§‡à¦‡
+  workflow_dispatch: {}   # manual trigger only ("Run workflow" button), no automatic schedule
 
 jobs:
   run:
