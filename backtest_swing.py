@@ -413,6 +413,24 @@ def backtest_market(key, cfg):
         print(f"  ট্রেইলে উইন: {trail_count} | ব্রেক-ইভেন: {be_count} | SL হিট: {sl_count} | Timeout: {timeout_count}")
         print(f"  গড় রিটার্ন/ট্রেড: {avg_ret:+.2f}% | সব ট্রেড যোগ করলে মোট: {total_ret:+.2f}%")
 
+        # ম্যাক্স ড্রডাউন + সবচেয়ে বেশি টানা লস — টোটাল রিটার্ন পজিটিভ হলেও মাঝপথে কতটা
+        # নিচে নামতে পারত সেটা না জানলে position sizing/রিস্ক ম্যানেজমেন্ট ঠিক করা যায় না।
+        equity = 0.0
+        peak = 0.0
+        max_dd = 0.0
+        cur_loss_streak = 0
+        max_loss_streak = 0
+        for t in trades:
+            equity += t["ret"]
+            peak = max(peak, equity)
+            max_dd = max(max_dd, peak - equity)
+            if t["ret"] <= 0:
+                cur_loss_streak += 1
+                max_loss_streak = max(max_loss_streak, cur_loss_streak)
+            else:
+                cur_loss_streak = 0
+        print(f"  সর্বোচ্চ ড্রডাউন (arithmetic %): -{max_dd:.2f}% | সবচেয়ে বেশি টানা লস: {max_loss_streak}টা ট্রেড")
+
         for label, subset in [("ট্রেন্ডিং (EMA)", [t for t in trades if "ট্রেন্ডিং" in t["regime"]]),
                                ("রেঞ্জিং (RSI)", [t for t in trades if "রেঞ্জিং" in t["regime"]])]:
             if subset:
