@@ -50,6 +50,14 @@ MAX_CONCURRENT_POSITIONS = 2     # ২টা মার্কেট বলে এ
 CORRELATION_FILTER = True        # একই দিকে একাধিক মার্কেটে একসাথে পজিশন নিষেধ
 COOLDOWN_TRIGGER_DD_PCT = 15.0   # পোর্টফোলিও ড্রডাউন এই % ছাড়ালে নতুন এন্ট্রি বন্ধ
 COOLDOWN_RESUME_DD_PCT = 5.0     # ড্রডাউন এই %-এ নেমে এলে আবার এন্ট্রি চালু
+# (বাগ-ফিক্স) আগের ভার্সনে ডেডলক হচ্ছিল: cooldown চালু হলে নতুন ট্রেড বন্ধ হয়ে যায়,
+# কিন্তু ইকুইটি/ড্রডাউন আপডেট হয় শুধু ট্রেড ক্লোজ হলে — তাই নতুন ট্রেড না হলে ড্রডাউনও
+# কখনো কমে না আর cooldown চিরতরে আটকে থাকে (একবার চালু হলে ১৪০টা এন্ট্রি স্কিপ হয়ে
+# পুরো বাকি ব্যাকটেস্ট ট্রেডশূন্য হয়ে গিয়েছিল)। এখন একটা সময়-ভিত্তিক ফোর্সড রিসেট
+# যোগ করা হলো: cooldown শুরুর পর এতদিন পার হয়ে গেলে ড্রডাউন যা-ই থাকুক, cooldown
+# জোর করে উঠে যাবে, যাতে ইকুইটি রিকভারির জন্য নতুন সিগন্যালের সুযোগই না থাকা অবস্থা আর
+# না হয়।
+COOLDOWN_MAX_DAYS = 60
 
 ROUND_TRIP_COST_PCT = {
     "XAUUSD": 0.10,
@@ -236,12 +244,23 @@ def run_portfolio_backtest(all_data):
     equity = 0.0
     peak = 0.0
     in_cooldown = False
+    cooldown_start = None       # (নতুন) cooldown কবে শুরু হয়েছিল
     cooldown_activations = 0
+    cooldown_forced_resumes = 0  # (নতুন) সময়সীমা পার হয়ে জোর করে কতবার রিসেট হলো
     skipped_for_cooldown = 0
     skipped_for_correlation = 0
     skipped_for_max_positions = 0
 
     for date in all_dates:
+        date_obj = dt.datetime.strptime(date, "%Y-%m-%d").date()
+
+        # (নতুন) ডেডলক-প্রতিরোধ: cooldown অনেকদিন ধরে চালু থাকলে জোর করে বন্ধ করে দেওয়া,
+        # যাতে ট্রেডশূন্য অবস্থায় চিরস্থায়ী আটকে না থাকে
+        if in_cooldown and cooldown_start is not None and (date_obj - cooldown_start).days >= COOLDOWN_MAX_DAYS:
+            in_cooldown = False
+            cooldown_start = None
+            cooldown_forced_resumes += 1
+
         for market, data in all_data.items():
             if date not in data["date_idx"]:
                 continue
@@ -271,9 +290,11 @@ def run_portfolio_backtest(all_data):
                     dd = peak - equity
                     if dd >= COOLDOWN_TRIGGER_DD_PCT and not in_cooldown:
                         in_cooldown = True
+                        cooldown_start = date_obj
                         cooldown_activations += 1
                     elif dd <= COOLDOWN_RESUME_DD_PCT and in_cooldown:
                         in_cooldown = False
+                        cooldown_start = None
                     trades_log.append({
                         "market": market, "direction": direction, "entry": trade["entry"],
                         "entry_time": trade["entry_time"], "exit_time": date,
@@ -326,10 +347,11 @@ def run_portfolio_backtest(all_data):
                 "moved_be": False, "extreme": entry, "bars": 0, "entry_time": date,
             }
 
-    return trades_log, equity, cooldown_activations, skipped_for_cooldown, skipped_for_correlation, skipped_for_max_positions
+    return (trades_log, equity, cooldown_activations, cooldown_forced_resumes,
+            skipped_for_cooldown, skipped_for_correlation, skipped_for_max_positions)
 
 
-def print_report(trades_log, final_equity, cooldown_activations, skip_cd, skip_corr, skip_max):
+def print_report(trades_log, final_equity, cooldown_activations, cooldown_forced_resumes, skip_cd, skip_corr, skip_max):
     print(f"\n{'=' * 60}\nপোর্টফোলিও রিপোর্ট (XAU + BTC, একসাথে, ম্যাক্স {MAX_CONCURRENT_POSITIONS} পজিশন)")
     print(f"মোট ট্রেড: {len(trades_log)}")
 
@@ -364,16 +386,16 @@ def print_report(trades_log, final_equity, cooldown_activations, skip_cd, skip_c
     print(f"\n  কম্বাইন্ড মোট রিটার্ন: {final_equity:+.2f}%")
     print(f"  কম্বাইন্ড সর্বোচ্চ ড্রডাউন: -{max_dd:.2f}%"
           + (f" ({dd_start} থেকে {dd_end})" if dd_start else ""))
-    print(f"  Cooldown চালু হয়েছে: {cooldown_activations} বার")
+    print(f"  Cooldown চালু হয়েছে: {cooldown_activations} বার | সময়সীমা পার হয়ে জোর করে রিসেট: {cooldown_forced_resumes} বার "
+          f"(অর্থাৎ ড্রডাউন না কমেও {COOLDOWN_MAX_DAYS} দিন পর আবার এন্ট্রি চালু হয়েছে)")
     print(f"  স্কিপ হওয়া এন্ট্রি — cooldown: {skip_cd} | correlation filter: {skip_corr} | max positions: {skip_max}")
 
 
 def main():
     all_data = {key: load_market_data(key, cfg) for key, cfg in MARKETS.items()}
-    trades_log, final_equity, cd_act, skip_cd, skip_corr, skip_max = run_portfolio_backtest(all_data)
-    print_report(trades_log, final_equity, cd_act, skip_cd, skip_corr, skip_max)
+    trades_log, final_equity, cd_act, cd_forced, skip_cd, skip_corr, skip_max = run_portfolio_backtest(all_data)
+    print_report(trades_log, final_equity, cd_act, cd_forced, skip_cd, skip_corr, skip_max)
 
 
 if __name__ == "__main__":
     main()
-          
