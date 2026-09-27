@@ -1,7 +1,16 @@
-"""EMA/RSI regime সিগন্যাল + ATR-ভিত্তিক SL/TP-এর বাস্তবসম্মত ব্যাকটেস্ট।
+"""EMA ট্রেন্ড রেজিম সিগন্যাল + ATR-ভিত্তিক ব্রেক-ইভেন/ট্রেইলিং-স্টপের বাস্তবসম্মত ব্যাকটেস্ট।
 
-প্রতিটা সিগন্যালের পরে ক্যান্ডেল বাই ক্যান্ডেল এগিয়ে দেখা হয় দাম আগে SL-এ পৌঁছায়
-নাকি TP-তে — তার ভিত্তিতে আসল লাভ/লস হিসাব করা হয় (ফিক্সড % এর বদলে)।
+আগের ভার্সন থেকে বদল:
+  - ADX থ্রেশহোল্ড 22→26 + ADX rising কনফার্মেশন, যাতে চপি মার্কেটকে ভুলভাবে
+    "ট্রেন্ডিং" ধরে false crossover কম নেওয়া হয়
+  - RSI-ভিত্তিক রেঞ্জিং রেজিম ডিফল্টে বন্ধ (ENABLE_RANGE_REGIME=False) — sample
+    সাইজ ছোট আর ফলাফল অসামঞ্জস্যপূর্ণ ছিল
+  - ফিক্সড TP-এর বদলে ব্রেক-ইভেন + ট্রেইলিং স্টপ — দাম ১×ATR অনুকূলে গেলে SL
+    ব্রেক-ইভেনে, তারপর extreme থেকে ATR দূরত্বে ট্রেইল করে, বড় মুভ cap হয় না
+  - একই মার্কেটে একবারে একটার বেশি ট্রেড ওপেন থাকতে পারে না (overlap প্রতিরোধ)
+
+প্রতিটা সিগন্যালের পরে ক্যান্ডেল বাই ক্যান্ডেল এগিয়ে দেখা হয় SL/ব্রেক-ইভেন/ট্রেইল
+কীভাবে রেজল্ভ হয় — তার ভিত্তিতে আসল লাভ/লস হিসাব করা হয় (ফিক্সড % এর বদলে)।
 
 চালানোর নিয়ম: TWELVE_DATA_API_KEY=xxxx python backtest_swing.py
 """
@@ -16,13 +25,16 @@ TWELVE_DATA_KEY = os.environ["TWELVE_DATA_API_KEY"]
 EMA_FAST = 9
 EMA_SLOW = 15
 ADX_PERIOD = 14
-ADX_THRESHOLD = 22
+ADX_THRESHOLD = 26          # আগে ছিল 22 — চপি মার্কেটকে ভুলভাবে "ট্রেন্ডিং" ধরে ফেলার সম্ভাবনা কমাতে বাড়ানো হলো
+ADX_RISING_LOOKBACK = 3     # ADX গত N ক্যান্ডেলের চেয়ে বেশি কিনা — ট্রেন্ড সত্যিই শক্তিশালী হচ্ছে তার কনফার্মেশন
+ENABLE_RANGE_REGIME = False  # RSI-ভিত্তিক রেঞ্জিং সিগন্যাল বন্ধ — আগের রানে সব মার্কেটে ৩-১০টা ট্রেড, ফলাফল অসামঞ্জস্যপূর্ণ ছিল
 RSI_PERIOD = 14
 RSI_OVERSOLD = 30
 RSI_OVERBOUGHT = 70
 ATR_PERIOD = 14
-SL_ATR_MULT = 1.5
-TP_ATR_MULT = 3.0
+SL_ATR_MULT = 1.5           # ইনিশিয়াল স্টপ লস (এন্ট্রি থেকে দূরত্ব)
+BE_TRIGGER_ATR_MULT = 1.0   # দাম এই পরিমাণ ATR অনুকূলে গেলে SL ব্রেক-ইভেনে টানা হয়
+TRAIL_ATR_MULT = 1.5        # ব্রেক-ইভেনের পর, সর্বোচ্চ/সর্বনিম্ন প্রাইস থেকে এই দূরত্বে ট্রেইলিং স্টপ (আর ফিক্সড TP নেই)
 MAX_HOLD_CANDLES = 60       # সর্বোচ্চ কতগুলো 4H ক্যান্ডেল (~10 দিন) ধরে ট্রেড খোলা রাখা হবে
 OUTPUT_4H = 2200            # ~১ বছর
 
@@ -210,22 +222,58 @@ def rsi_reversal(rsi, idx):
     return None
 
 
-def simulate_exit(c4, idx, direction, entry, sl, tp, max_hold=MAX_HOLD_CANDLES):
-    """entry-এর পরের ক্যান্ডেলগুলো ধরে দেখে আগে SL না TP হিট হয়। একই ক্যান্ডেলে দুটোই
-    সম্ভব হলে রক্ষণাত্মকভাবে (worst case) SL হিট ধরা হয়।"""
+def adx_rising(adx, idx, lookback=ADX_RISING_LOOKBACK):
+    """ADX বর্তমানে lookback ক্যান্ডেল আগের চেয়ে বেশি কিনা — ট্রেন্ড দুর্বল হয়ে আসার
+    সময় false crossover এড়াতে সাহায্য করে।"""
+    if idx < lookback:
+        return False
+    a0, a1 = adx[idx - lookback], adx[idx]
+    if a0 is None or a1 is None:
+        return False
+    return a1 > a0
+
+
+def simulate_exit(c4, idx, direction, entry, initial_sl, atr_val, max_hold=MAX_HOLD_CANDLES):
+    """entry-এর পরের ক্যান্ডেলগুলো ধরে এগিয়ে ব্রেক-ইভেন + ট্রেইলিং স্টপ সিমুলেট করে।
+    দাম BE_TRIGGER_ATR_MULT×ATR অনুকূলে গেলে SL ব্রেক-ইভেনে টানা হয়, তারপর সর্বোচ্চ/
+    সর্বনিম্ন প্রাইস থেকে TRAIL_ATR_MULT×ATR দূরত্বে ট্রেইল করে — কোনো ফিক্সড TP নেই,
+    তাই বড় মুভগুলো cap না হয়ে যতদূর যায় ততদূর ধরা যায়। একই ক্যান্ডেলে SL হিট ও নতুন
+    হাই/লো দুটোই সম্ভব হলে রক্ষণাত্মকভাবে SL আগে চেক করা হয়।"""
     end = min(idx + max_hold, len(c4) - 1)
+    sl = initial_sl
+    moved_be = False
+    extreme = entry
+
     for j in range(idx + 1, end + 1):
         hi, lo = c4[j][2], c4[j][3]
-        if direction == "bull":
-            hit_sl = lo <= sl
-            hit_tp = hi >= tp
-        else:
-            hit_sl = hi >= sl
-            hit_tp = lo <= tp
+
+        hit_sl = lo <= sl if direction == "bull" else hi >= sl
         if hit_sl:
-            return "SL", sl, j - idx
-        if hit_tp:
-            return "TP", tp, j - idx
+            if not moved_be:
+                outcome = "SL"
+            elif abs(sl - entry) < 1e-9:
+                outcome = "BE"
+            else:
+                outcome = "TRAIL"
+            return outcome, sl, j - idx
+
+        if direction == "bull":
+            if hi > extreme:
+                extreme = hi
+            if not moved_be and extreme - entry >= BE_TRIGGER_ATR_MULT * atr_val:
+                sl = max(sl, entry)
+                moved_be = True
+            if moved_be:
+                sl = max(sl, extreme - TRAIL_ATR_MULT * atr_val)
+        else:
+            if lo < extreme:
+                extreme = lo
+            if not moved_be and entry - extreme >= BE_TRIGGER_ATR_MULT * atr_val:
+                sl = min(sl, entry)
+                moved_be = True
+            if moved_be:
+                sl = min(sl, extreme + TRAIL_ATR_MULT * atr_val)
+
     exit_price = c4[end][4]
     return "TIMEOUT", exit_price, end - idx
 
@@ -250,14 +298,20 @@ def backtest_market(key, cfg):
 
     warmup = max(EMA_SLOW, ADX_PERIOD, RSI_PERIOD, ATR_PERIOD) + 10
     trades = []
+    next_free_idx = 0  # আগের ট্রেড খোলা থাকা অবস্থায় নতুন ট্রেড না নেওয়ার জন্য (overlap প্রতিরোধ)
 
     for idx in range(warmup, len(c4) - MAX_HOLD_CANDLES):
+        if idx < next_free_idx:
+            continue
         if adx[idx] is None or atr[idx] is None:
             continue
-        if adx[idx] >= ADX_THRESHOLD:
+
+        direction = None
+        regime = None
+        if adx[idx] >= ADX_THRESHOLD and adx_rising(adx, idx):
             regime = "ট্রেন্ডিং (EMA)"
             direction = ema_crossover(ema9, ema15, idx)
-        else:
+        elif ENABLE_RANGE_REGIME and adx[idx] < ADX_THRESHOLD:
             regime = "রেঞ্জিং (RSI)"
             direction = rsi_reversal(rsi, idx)
         if not direction:
@@ -265,14 +319,9 @@ def backtest_market(key, cfg):
 
         entry = c4[idx][4]
         atr_val = atr[idx]
-        if direction == "bull":
-            sl = entry - SL_ATR_MULT * atr_val
-            tp = entry + TP_ATR_MULT * atr_val
-        else:
-            sl = entry + SL_ATR_MULT * atr_val
-            tp = entry - TP_ATR_MULT * atr_val
+        initial_sl = entry - SL_ATR_MULT * atr_val if direction == "bull" else entry + SL_ATR_MULT * atr_val
 
-        outcome, exit_price, bars = simulate_exit(c4, idx, direction, entry, sl, tp)
+        outcome, exit_price, bars = simulate_exit(c4, idx, direction, entry, initial_sl, atr_val)
         ret = trade_return_pct(direction, entry, exit_price)
         entry_time = dt.datetime.fromtimestamp(c4[idx][0], tz=dt.timezone.utc)
 
@@ -280,6 +329,7 @@ def backtest_market(key, cfg):
             {"time": entry_time, "direction": direction, "regime": regime,
              "entry": entry, "outcome": outcome, "ret": ret, "bars": bars}
         )
+        next_free_idx = idx + bars + 1
 
     days = OUTPUT_4H * 4 // 24
     print(f"{name}: মোট {len(trades)}টা ট্রেড (গত ~{days} দিনে)\n")
@@ -299,11 +349,12 @@ def backtest_market(key, cfg):
         avg_ret = total_ret / len(trades)
         win_rate = len(wins) / len(trades) * 100
         sl_count = sum(1 for t in trades if t["outcome"] == "SL")
-        tp_count = sum(1 for t in trades if t["outcome"] == "TP")
+        be_count = sum(1 for t in trades if t["outcome"] == "BE")
+        trail_count = sum(1 for t in trades if t["outcome"] == "TRAIL")
         timeout_count = sum(1 for t in trades if t["outcome"] == "TIMEOUT")
 
         print(f"\n  মোট ট্রেড: {len(trades)} | Win rate: {len(wins)}/{len(trades)} ({win_rate:.0f}%)")
-        print(f"  TP হিট: {tp_count} | SL হিট: {sl_count} | Timeout: {timeout_count}")
+        print(f"  ট্রেইলে উইন: {trail_count} | ব্রেক-ইভেন: {be_count} | SL হিট: {sl_count} | Timeout: {timeout_count}")
         print(f"  গড় রিটার্ন/ট্রেড: {avg_ret:+.2f}% | সব ট্রেড যোগ করলে মোট: {total_ret:+.2f}%")
 
         for label, subset in [("ট্রেন্ডিং (EMA)", [t for t in trades if "ট্রেন্ডিং" in t["regime"]]),
@@ -336,3 +387,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
