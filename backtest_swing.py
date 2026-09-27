@@ -297,10 +297,29 @@ def backtest_market(key, cfg):
     atr = calc_atr(c4, ATR_PERIOD)
 
     warmup = max(EMA_SLOW, ADX_PERIOD, RSI_PERIOD, ATR_PERIOD) + 10
+    scan_range = range(warmup, len(c4) - MAX_HOLD_CANDLES)
+
+    # ডায়াগনস্টিক: ট্রেন্ড-ফিল্টার (ADX শর্ত) আর raw EMA crossover আলাদা আলাদা কতবার সত্যি হয়,
+    # আর কতবার একসাথে মেলে — কোনো মার্কেটে ট্রেড 0 বা খুব কম হলে এখান থেকে বোঝা যাবে কোন শর্তটা
+    # বাধা দিচ্ছে (ADX কখনো শর্ত পূরণ করে না, নাকি crossover-এর সময় ADX শর্ত মেলে না)।
+    trend_pass = sum(
+        1 for i in scan_range if adx[i] is not None and adx[i] >= ADX_THRESHOLD and adx_rising(adx, i)
+    )
+    raw_cross = sum(1 for i in scan_range if ema_crossover(ema9, ema15, i) is not None)
+    overlap = sum(
+        1 for i in scan_range
+        if adx[i] is not None and adx[i] >= ADX_THRESHOLD and adx_rising(adx, i)
+        and ema_crossover(ema9, ema15, i) is not None
+    )
+    print(
+        f"{name}: [ডায়াগনস্টিক] ট্রেন্ড-ফিল্টার পাস: {trend_pass} ক্যান্ডেল | "
+        f"raw EMA crossover: {raw_cross} বার | দুটো একসাথে মিলেছে: {overlap} বার"
+    )
+
     trades = []
     next_free_idx = 0  # আগের ট্রেড খোলা থাকা অবস্থায় নতুন ট্রেড না নেওয়ার জন্য (overlap প্রতিরোধ)
 
-    for idx in range(warmup, len(c4) - MAX_HOLD_CANDLES):
+    for idx in scan_range:
         if idx < next_free_idx:
             continue
         if adx[idx] is None or atr[idx] is None:
@@ -387,4 +406,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
+  
