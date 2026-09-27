@@ -21,8 +21,9 @@ TWELVE_DATA_KEY = os.environ["TWELVE_DATA_API_KEY"]
 EMA_FAST = 9
 EMA_SLOW = 15
 ADX_PERIOD = 14
-ADX_THRESHOLD = 20
+ADX_THRESHOLD = 18
 SWEEP_LOOKBACK = 10
+SWEEP_WINDOW = 3
 
 # ব্যাকটেস্টের জন্য কত ইতিহাস আনা হবে
 OUTPUT_4H = 1000   # ~1000 x 4h ≈ ১৬৬ দিন (৫.৫ মাস)
@@ -176,6 +177,13 @@ def liquidity_sweep(candles, idx, direction, lookback=SWEEP_LOOKBACK):
     return cur_high > recent_high and cur_close < recent_high
 
 
+def liquidity_sweep_recent(candles, idx, direction, lookback=SWEEP_LOOKBACK, window=SWEEP_WINDOW):
+    for j in range(max(0, idx - window + 1), idx + 1):
+        if liquidity_sweep(candles, j, direction, lookback):
+            return True
+    return False
+
+
 def find_daily_idx(c1, t):
     """t সময়ের আগে সম্পূর্ণ ক্লোজড শেষ ডেইলি ক্যান্ডেলের ইনডেক্স (ফরওয়ার্ড-লিকিং এড়াতে)।"""
     idx = None
@@ -213,15 +221,13 @@ def backtest_market(key, cfg):
             continue
         if adx4[idx] is None or adx4[idx] < ADX_THRESHOLD:
             continue
-        if adx4[idx - 1] is not None and adx4[idx] <= adx4[idx - 1]:
-            continue
         if plus_di4[idx] is None or minus_di4[idx] is None:
             continue
         if direction == "bull" and not (plus_di4[idx] > minus_di4[idx]):
             continue
         if direction == "bear" and not (minus_di4[idx] > plus_di4[idx]):
             continue
-        if not liquidity_sweep(c4, idx, direction):
+        if not liquidity_sweep_recent(c4, idx, direction):
             continue
 
         idx1 = find_daily_idx(c1, c4[idx][0])
