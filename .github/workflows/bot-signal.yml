@@ -1,0 +1,42 @@
+name: BTC Signal Bot
+
+on:
+  schedule:
+    # Runs daily at 00:30 UTC, shortly after the daily candle closes
+    - cron: "30 0 * * *"
+  workflow_dispatch: {}   # allows manual run from the Actions tab ("Run workflow")
+
+permissions:
+  contents: write   # needed to commit state.json back to the repo
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run bot
+        env:
+          TWELVE_DATA_API_KEY: ${{ secrets.TWELVE_DATA_API_KEY }}
+        run: python bot.py
+
+      - name: Commit updated state.json
+        run: |
+          git config user.name "btc-signal-bot"
+          git config user.email "actions@users.noreply.github.com"
+          if [ -n "$(git status --porcelain state.json)" ]; then
+            git add state.json
+            git commit -m "Update state.json - $(date -u +'%Y-%m-%d %H:%M UTC')"
+            git push
+          else
+            echo "No changes to state.json, skipping commit."
+          fi
