@@ -1,13 +1,17 @@
 """EMA ট্রেন্ড রেজিম সিগন্যাল + ATR-ভিত্তিক ব্রেক-ইভেন/ট্রেইলিং-স্টপের বাস্তবসম্মত ব্যাকটেস্ট।
 
 আগের ভার্সন থেকে বদল:
-  - ADX থ্রেশহোল্ড 22→26 + ADX rising কনফার্মেশন, যাতে চপি মার্কেটকে ভুলভাবে
-    "ট্রেন্ডিং" ধরে false crossover কম নেওয়া হয়
+  - ADX থ্রেশহোল্ড 22→26, চপি মার্কেটকে ভুলভাবে "ট্রেন্ডিং" ধরার সম্ভাবনা কমাতে
   - RSI-ভিত্তিক রেঞ্জিং রেজিম ডিফল্টে বন্ধ (ENABLE_RANGE_REGIME=False) — sample
     সাইজ ছোট আর ফলাফল অসামঞ্জস্যপূর্ণ ছিল
   - ফিক্সড TP-এর বদলে ব্রেক-ইভেন + ট্রেইলিং স্টপ — দাম ১×ATR অনুকূলে গেলে SL
     ব্রেক-ইভেনে, তারপর extreme থেকে ATR দূরত্বে ট্রেইল করে, বড় মুভ cap হয় না
   - একই মার্কেটে একবারে একটার বেশি ট্রেড ওপেন থাকতে পারে না (overlap প্রতিরোধ)
+  - এন্ট্রি ট্রিগার এখন ডিফল্টে "pullback" (TREND_ENTRY_MODE): raw EMA9/15 crossover
+    আর ADX থ্রেশহোল্ড একই ক্যান্ডেলে মেলা কাকতালীয় (ডায়াগনস্টিকে দেখা গেছে ট্রেন্ড-ফিল্টার
+    আর crossover দুটোই প্রচুর, কিন্তু একসাথে মেলে খুব কম), তাই এখন প্রতিষ্ঠিত ট্রেন্ডে
+    (ADX ≥ থ্রেশহোল্ড) দাম fast EMA-তে পুলব্যাক করে বাউন্স করলে সিগন্যাল নেওয়া হয় —
+    ট্রেন্ড অবস্থা বহু ক্যান্ডেল ধরে টিকে থাকে বলে এন্ট্রির সুযোগ অনেক বেশি পাওয়া যায়
 
 প্রতিটা সিগন্যালের পরে ক্যান্ডেল বাই ক্যান্ডেল এগিয়ে দেখা হয় SL/ব্রেক-ইভেন/ট্রেইল
 কীভাবে রেজল্ভ হয় — তার ভিত্তিতে আসল লাভ/লস হিসাব করা হয় (ফিক্সড % এর বদলে)।
@@ -28,6 +32,8 @@ ADX_PERIOD = 14
 ADX_THRESHOLD = 26          # আগে ছিল 22 — চপি মার্কেটকে ভুলভাবে "ট্রেন্ডিং" ধরে ফেলার সম্ভাবনা কমাতে বাড়ানো হলো
 ADX_RISING_LOOKBACK = 3     # ADX গত N ক্যান্ডেলের চেয়ে বেশি কিনা — ট্রেন্ড সত্যিই শক্তিশালী হচ্ছে তার কনফার্মেশন
 ENABLE_RANGE_REGIME = False  # RSI-ভিত্তিক রেঞ্জিং সিগন্যাল বন্ধ — আগের রানে সব মার্কেটে ৩-১০টা ট্রেড, ফলাফল অসামঞ্জস্যপূর্ণ ছিল
+TREND_ENTRY_MODE = "pullback"  # "pullback" (ট্রেন্ডে EMA9-তে পুলব্যাক বাউন্স) বা "crossover" (পুরনো EMA9/15 ক্রস)
+PULLBACK_BODY_CONFIRM = True  # পুলব্যাক ক্যান্ডেলটা বুলিশ/বিয়ারিশ বডি (close vs open) কিনা চেক করবে
 RSI_PERIOD = 14
 RSI_OVERSOLD = 30
 RSI_OVERBOUGHT = 70
@@ -224,13 +230,31 @@ def rsi_reversal(rsi, idx):
 
 def adx_rising(adx, idx, lookback=ADX_RISING_LOOKBACK):
     """ADX বর্তমানে lookback ক্যান্ডেল আগের চেয়ে বেশি কিনা — ট্রেন্ড দুর্বল হয়ে আসার
-    সময় false crossover এড়াতে সাহায্য করে।"""
+    সময় false crossover এড়াতে সাহায্য করে। (শুধু TREND_ENTRY_MODE="crossover"-এ ব্যবহৃত)"""
     if idx < lookback:
         return False
     a0, a1 = adx[idx - lookback], adx[idx]
     if a0 is None or a1 is None:
         return False
     return a1 > a0
+
+
+def pullback_signal(c4, ema_fast_vals, ema_slow_vals, adx, idx):
+    """crossover-এর বদলে: প্রতিষ্ঠিত ট্রেন্ডে (ADX ≥ থ্রেশহোল্ড, EMA9 বনাম EMA15 দিয়ে দিক)
+    দাম fast EMA (EMA9)-তে পুলব্যাক করে আবার ট্রেন্ডের দিকে বাউন্স করে ক্লোজ করলে সিগন্যাল।
+    এখানে ADX আর সিগন্যাল একই মুহূর্তে মেলাতে হয় না, কারণ ট্রেন্ড অবস্থা বহু ক্যান্ডেল ধরে
+    টিকে থাকে (crossover-এর মতো এক-মুহূর্তের ঘটনা না) — তাই অনেক বেশি সুযোগ পাওয়া যায়।"""
+    ef, es, a = ema_fast_vals[idx], ema_slow_vals[idx], adx[idx]
+    if ef is None or es is None or a is None or a < ADX_THRESHOLD:
+        return None
+    o, hi, lo, cl = c4[idx][1], c4[idx][2], c4[idx][3], c4[idx][4]
+    if ef > es:  # আপট্রেন্ড
+        if lo <= ef and cl > ef and (not PULLBACK_BODY_CONFIRM or cl > o):
+            return "bull"
+    else:  # ডাউনট্রেন্ড
+        if hi >= ef and cl < ef and (not PULLBACK_BODY_CONFIRM or cl < o):
+            return "bear"
+    return None
 
 
 def simulate_exit(c4, idx, direction, entry, initial_sl, atr_val, max_hold=MAX_HOLD_CANDLES):
@@ -327,10 +351,14 @@ def backtest_market(key, cfg):
 
         direction = None
         regime = None
-        if adx[idx] >= ADX_THRESHOLD and adx_rising(adx, idx):
-            regime = "ট্রেন্ডিং (EMA)"
-            direction = ema_crossover(ema9, ema15, idx)
-        elif ENABLE_RANGE_REGIME and adx[idx] < ADX_THRESHOLD:
+        if adx[idx] is not None and adx[idx] >= ADX_THRESHOLD:
+            if TREND_ENTRY_MODE == "pullback":
+                regime = "ট্রেন্ডিং (পুলব্যাক)"
+                direction = pullback_signal(c4, ema9, ema15, adx, idx)
+            else:
+                regime = "ট্রেন্ডিং (EMA)"
+                direction = ema_crossover(ema9, ema15, idx) if adx_rising(adx, idx) else None
+        elif ENABLE_RANGE_REGIME and adx[idx] is not None and adx[idx] < ADX_THRESHOLD:
             regime = "রেঞ্জিং (RSI)"
             direction = rsi_reversal(rsi, idx)
         if not direction:
@@ -406,4 +434,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-  
