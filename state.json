@@ -1,4 +1,1 @@
-{
-  "position": null,
-  "last_processed_date": "2026-09-27"
-}
+{"position": null, "last_processed_date": "2026-09-27", "heartbeat": "", "m": {"XAU": {"level": 0, "last_alert": 0, "calm_since": 0, "fails": 0, "down": false, "count": 0}, "BTC": {"level": 0, "last_alert": 0, "calm_since": 0, "fails": 0, "down": false, "count": 0}}}
