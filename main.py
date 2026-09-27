@@ -8,6 +8,10 @@
           (ধারাবাহিক টানা মুভ ধরে, যা এক ক্যান্ডেলে ধরা পড়ে না)।
 - PVT   : ভলিউম × রিটার্ন (শুধু BTC, কারণ গোল্ড OTC বলে ভলিউম অনির্ভরযোগ্য)।
 
+এছাড়া BTC-তে একটা ভলিউম-কনফার্মেশন যোগ করা হয়েছে: ATR/RANGE5 বেড়ে গেলেও,
+ভলিউমও একইসাথে বাড়ছে কিনা তা দেখে অ্যালার্টকে "নিশ্চিত" (🔴) নাকি "সন্দেহজনক" (🟡)
+হিসেবে দেখানো হয় — যাতে বোঝা যায় নড়াচড়াটা সত্যিকারের ভলিউম-চালিত নাকি স্রেফ থিন-মার্কেট স্পাইক।
+
 আগের সংস্করণ থেকে যা উন্নত হয়েছে:
 - মিডিয়ান বেজলাইন: একটা বড় স্পাইক গড় নষ্ট করে না।
 - স্টেট ফাইল (state.json): রানের মাঝেও cooldown/লেভেল মনে থাকে, তাই বারবার একই অ্যালার্ট আসে না।
@@ -146,14 +150,19 @@ def btc_candles():
 
 
 # th = থ্রেশহোল্ড (None মানে ওই মেট্রিক বন্ধ)। প্রথমে এই মান দিয়ে চালান, অ্যালার্ট বেশি/কম মনে হলে বদলান।
+# vol_confirm: শুধু BTC-তে। ATR/RANGE5 ট্রিগার হলে ভলিউমও একইসাথে এতগুণ বাড়লে অ্যালার্টকে
+# "নিশ্চিত" (🔴) ধরা হবে, নাহলে "সন্দেহজনক" (🟡) হিসেবে জানানো হবে। গোল্ডের ভলিউম OTC বলে
+# অনির্ভরযোগ্য, তাই গোল্ডে এই ফিচার বন্ধ রাখা হয়েছে।
 MARKETS = {
     "XAU": {
         "name": "গোল্ড (XAU)", "fetch": gold_candles, "poll": GOLD_POLL, "fail_limit": 4,
         "th": {"atr": 2.5, "r5": 2.0, "pvt": None},
+        "vol_confirm": None,
     },
     "BTC": {
         "name": "বিটকয়েন (BTC)", "fetch": btc_candles, "poll": BTC_POLL, "fail_limit": 6,
         "th": {"atr": 2.5, "r5": 2.0, "pvt": 6.0},
+        "vol_confirm": 1.4,
     },
 }
 
@@ -212,6 +221,12 @@ def analyse(candles, use_pvt):
         base_pv = statistics.median(pv[-(LOOKBACK + 2):-2])
         ratios["pvt"] = max(pv[-2:]) / base_pv if base_pv > 0 else None
 
+        # ভলিউম নিজে কতটা বেড়েছে (বেজলাইনের তুলনায়) — ATR/RANGE5 কনফার্ম করতে ব্যবহার হয়।
+        vols = [x[5] for x in candles]
+        base_vol = statistics.median(vols[-(LOOKBACK + 2):-2])
+        vol_now = max(vols[-2:])
+        ratios["vol"] = vol_now / base_vol if base_vol > 0 else None
+
     return {
         "ratios": ratios,
         "tr_now": tr_now, "base_tr": base_tr,
@@ -221,8 +236,13 @@ def analyse(candles, use_pvt):
     }
 
 
-def evaluate(info, th):
-    """(level, hits, calm) — level: 0 কিছু নয়, 1 = 🟡, 2 = 🔴"""
+def evaluate(info, th, vol_confirm=None):
+    """(level, hits, calm, vol_ok) — level: 0 কিছু নয়, 1 = 🟡, 2 = 🔴
+
+    vol_confirm না থাকলে (None) আগের মতোই আচরণ (level নির্ভর করে strong/একাধিক hit-এর উপর)।
+    vol_confirm থাকলে (শুধু BTC): atr/r5 hit হলেও, ভলিউমও একইসাথে বাড়লে তবেই level 2 (🔴),
+    নাহলে level 1 (🟡) — যাতে বোঝা যায় নড়াচড়াটা ভলিউম দিয়ে নিশ্চিত হয়েছে কিনা।
+    """
     hits, strong, calm = [], False, True
     for k, thr in th.items():
         r = info["ratios"].get(k)
@@ -234,8 +254,20 @@ def evaluate(info, th):
             strong = True
         if r >= thr * CALM_FRAC:
             calm = False
-    level = 0 if not hits else (2 if strong or len(hits) >= 2 else 1)
-    return level, hits, calm
+
+    vol_ok = None
+    if vol_confirm is not None:
+        vr = info["ratios"].get("vol")
+        vol_ok = vr is not None and vr >= vol_confirm
+
+    if not hits:
+        level = 0
+    elif vol_confirm is not None:
+        level = 2 if (strong or len(hits) >= 2 or vol_ok) else 1
+    else:
+        level = 2 if strong or len(hits) >= 2 else 1
+
+    return level, hits, calm, vol_ok
 
 
 # ---------------- টেলিগ্রাম ও স্টেট ----------------
@@ -283,9 +315,17 @@ def bd_now():
     return dt.datetime.now(BD_TZ).strftime("%H:%M")
 
 
-def alert_text(cfg, info, level, hits):
+def alert_text(cfg, info, level, hits, vol_ok=None):
     r = info["ratios"]
-    icon, head = ("🔴", "খুবই অস্থির") if level == 2 else ("🟡", "অস্থির")
+    if vol_ok is not None:
+        # এই মার্কেটে ভলিউম-কনফার্মেশন চালু আছে (এখন পর্যন্ত শুধু BTC)
+        if level == 2:
+            icon, head = "🔴", "খুবই অস্থির, ভলিউমও নিশ্চিত করছে"
+        else:
+            icon, head = "🟡", "অস্থির (ভলিউম এখনও স্বাভাবিক, নিশ্চিত হয়নি)"
+    else:
+        icon, head = ("🔴", "খুবই অস্থির") if level == 2 else ("🟡", "অস্থির")
+
     lines = [f"{icon} {cfg['name']} এখন {head}!"]
     if "atr" in hits:
         lines.append(
@@ -299,6 +339,8 @@ def alert_text(cfg, info, level, hits):
         )
     if "pvt" in hits:
         lines.append(f"• ভলিউম-চালিত মুভ স্বাভাবিকের {r['pvt']:.1f}x (PVT)")
+    if vol_ok is not None and r.get("vol") is not None:
+        lines.append(f"• ভলিউম স্বাভাবিকের {r['vol']:.1f}x")
     lines.append(f"দাম: ${info['price']:,.2f}")
     lines.append(f"সময় (বাংলাদেশ): {bd_now()}")
     return "\n".join(lines)
@@ -329,12 +371,12 @@ def handle_data(cfg, ms, candles):
     r = info["ratios"]
     print(
         f"{name}: ATR {r['atr']:.2f}x, R5 {r['r5']:.2f}x, PVT {r.get('pvt')}, "
-        f"ডেটার বয়স {info['stale']:.0f}s"
+        f"VOL {r.get('vol')}, ডেটার বয়স {info['stale']:.0f}s"
     )
     if info["stale"] > MAX_STALE:
         return  # মার্কেট বন্ধ বা ডেটা পুরনো
 
-    level, hits, calm = evaluate(info, cfg["th"])
+    level, hits, calm, vol_ok = evaluate(info, cfg["th"], cfg.get("vol_confirm"))
     now = time.time()
 
     if level:
@@ -343,7 +385,7 @@ def handle_data(cfg, ms, candles):
         escalated = ms["level"] > 0 and level > ms["level"]
         due = gap >= (REPEAT_EVERY if ms["level"] else COOLDOWN)
         if escalated or due:
-            if send(alert_text(cfg, info, level, hits)):
+            if send(alert_text(cfg, info, level, hits, vol_ok)):
                 ms["level"] = level
                 ms["last_alert"] = now
                 ms["count"] += 1
@@ -381,6 +423,8 @@ def send_status(title, st, reset_counts=False):
             r = info["ratios"].get(k)
             if thr is not None and r is not None:
                 parts.append(f"{LABELS[k]} {r:.1f}x (থ্রে {thr:.1f}x)")
+        if cfg.get("vol_confirm") and info["ratios"].get("vol") is not None:
+            parts.append(f"ভলিউম {info['ratios']['vol']:.1f}x (থ্রে {cfg['vol_confirm']:.1f}x)")
         parts.append(f"ডেটা {age_text(info['stale'])}")
         parts.append(f"গত রিপোর্টের পর অ্যালার্ট: {ms['count']}টি")
         lines.append(" | ".join(parts))
