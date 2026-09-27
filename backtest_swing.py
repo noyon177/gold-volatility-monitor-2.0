@@ -1,20 +1,16 @@
-"""EMA ট্রেন্ড রেজিম সিগন্যাল + ATR-ভিত্তিক ব্রেক-ইভেন/ট্রেইলিং-স্টপের বাস্তবসম্মত ব্যাকটেস্ট।
+"""EMA ট্রেন্ড রেজিম সিগন্যাল + ATR-ভিত্তিক ব্রেক-ইভেন/ট্রেইলিং-স্টপের বাস্তবসম্মত সুইং ব্যাকটেস্ট।
 
-আগের ভার্সন থেকে বদল:
-  - ADX থ্রেশহোল্ড 22→26, চপি মার্কেটকে ভুলভাবে "ট্রেন্ডিং" ধরার সম্ভাবনা কমাতে
-  - RSI-ভিত্তিক রেঞ্জিং রেজিম ডিফল্টে বন্ধ (ENABLE_RANGE_REGIME=False) — sample
-    সাইজ ছোট আর ফলাফল অসামঞ্জস্যপূর্ণ ছিল
-  - ফিক্সড TP-এর বদলে ব্রেক-ইভেন + ট্রেইলিং স্টপ — দাম ১×ATR অনুকূলে গেলে SL
-    ব্রেক-ইভেনে, তারপর extreme থেকে ATR দূরত্বে ট্রেইল করে, বড় মুভ cap হয় না
-  - একই মার্কেটে একবারে একটার বেশি ট্রেড ওপেন থাকতে পারে না (overlap প্রতিরোধ)
-  - এন্ট্রি ট্রিগার এখন ডিফল্টে "pullback" (TREND_ENTRY_MODE): raw EMA9/15 crossover
-    আর ADX থ্রেশহোল্ড একই ক্যান্ডেলে মেলা কাকতালীয় (ডায়াগনস্টিকে দেখা গেছে ট্রেন্ড-ফিল্টার
-    আর crossover দুটোই প্রচুর, কিন্তু একসাথে মেলে খুব কম), তাই এখন প্রতিষ্ঠিত ট্রেন্ডে
-    (ADX ≥ থ্রেশহোল্ড) দাম fast EMA-তে পুলব্যাক করে বাউন্স করলে সিগন্যাল নেওয়া হয় —
-    ট্রেন্ড অবস্থা বহু ক্যান্ডেল ধরে টিকে থাকে বলে এন্ট্রির সুযোগ অনেক বেশি পাওয়া যায়
+দৈনিক (1day) ক্যান্ডেলে রূপান্তরিত, 4H ভার্সনের পর — কারণ:
+  - 4H-তে SL/TP মাত্র ০.৫-৩% দূরত্বে ছিল, তাই সামান্য spread/commission-ও পুরো এজ খেয়ে
+    ফেলছিল; দৈনিক চার্টে টার্গেট অনেক বড় (৩-১৫%+), তাই একই cost অনুপাতে অনেক ছোট
+  - Twelve Data-তে দৈনিক ক্যান্ডেলে ১ বছরের বদলে ৮-১০ বছরের ডেটা পাওয়া যায় — অনেক বেশি
+    বিশ্বাসযোগ্য টেস্ট, একাধিক মার্কেট-সাইকেল কভার করে (শুধু ১টা বছরে ফিট করানো না)
 
-প্রতিটা সিগন্যালের পরে ক্যান্ডেল বাই ক্যান্ডেল এগিয়ে দেখা হয় SL/ব্রেক-ইভেন/ট্রেইল
-কীভাবে রেজল্ভ হয় — তার ভিত্তিতে আসল লাভ/লস হিসাব করা হয় (ফিক্সড % এর বদলে)।
+লজিক অপরিবর্তিত:
+  - প্রতিষ্ঠিত ট্রেন্ডে (ADX ≥ থ্রেশহোল্ড) fast EMA-তে পুলব্যাক করে বাউন্স করলে এন্ট্রি
+  - ATR-ভিত্তিক ইনিশিয়াল SL, তারপর ব্রেক-ইভেন + ট্রেইলিং স্টপ (ফিক্সড TP নেই)
+  - একই মার্কেটে একবারে একটার বেশি ট্রেড খোলা থাকতে পারে না (overlap প্রতিরোধ)
+  - প্রতিটা ট্রেডে round-trip cost (spread/slippage) বাদ দিয়ে নেট রিটার্ন হিসাব হয়
 
 চালানোর নিয়ম: TWELVE_DATA_API_KEY=xxxx python backtest_swing.py
 """
@@ -26,23 +22,35 @@ import requests
 
 TWELVE_DATA_KEY = os.environ["TWELVE_DATA_API_KEY"]
 
-EMA_FAST = 9
-EMA_SLOW = 15
+CANDLE_INTERVAL = "1day"
+OUTPUT_SIZE = 2500          # ~৮-১০ বছরের দৈনিক ক্যান্ডেল (উইকেন্ড/ছুটি বাদে)
+
+EMA_FAST = 20               # দৈনিক সুইং-এ প্রচলিত পিরিয়ড (4H-তে ছিল 9)
+EMA_SLOW = 50               # (4H-তে ছিল 15)
 ADX_PERIOD = 14
-ADX_THRESHOLD = 26          # আগে ছিল 22 — চপি মার্কেটকে ভুলভাবে "ট্রেন্ডিং" ধরে ফেলার সম্ভাবনা কমাতে বাড়ানো হলো
-ADX_RISING_LOOKBACK = 3     # ADX গত N ক্যান্ডেলের চেয়ে বেশি কিনা — ট্রেন্ড সত্যিই শক্তিশালী হচ্ছে তার কনফার্মেশন
-ENABLE_RANGE_REGIME = False  # RSI-ভিত্তিক রেঞ্জিং সিগন্যাল বন্ধ — আগের রানে সব মার্কেটে ৩-১০টা ট্রেড, ফলাফল অসামঞ্জস্যপূর্ণ ছিল
-TREND_ENTRY_MODE = "pullback"  # "pullback" (ট্রেন্ডে EMA9-তে পুলব্যাক বাউন্স) বা "crossover" (পুরনো EMA9/15 ক্রস)
-PULLBACK_BODY_CONFIRM = True  # পুলব্যাক ক্যান্ডেলটা বুলিশ/বিয়ারিশ বডি (close vs open) কিনা চেক করবে
+ADX_THRESHOLD = 25
+ADX_RISING_LOOKBACK = 5
+ENABLE_RANGE_REGIME = False  # RSI-ভিত্তিক রেঞ্জিং সিগন্যাল বন্ধ — আগের রানে ফলাফল অসামঞ্জস্যপূর্ণ ছিল
+TREND_ENTRY_MODE = "pullback"  # "pullback" (ট্রেন্ডে EMA20-তে পুলব্যাক বাউন্স) বা "crossover"
+PULLBACK_BODY_CONFIRM = True
 RSI_PERIOD = 14
 RSI_OVERSOLD = 30
 RSI_OVERBOUGHT = 70
 ATR_PERIOD = 14
-SL_ATR_MULT = 1.5           # ইনিশিয়াল স্টপ লস (এন্ট্রি থেকে দূরত্ব)
-BE_TRIGGER_ATR_MULT = 1.0   # দাম এই পরিমাণ ATR অনুকূলে গেলে SL ব্রেক-ইভেনে টানা হয়
-TRAIL_ATR_MULT = 1.5        # ব্রেক-ইভেনের পর, সর্বোচ্চ/সর্বনিম্ন প্রাইস থেকে এই দূরত্বে ট্রেইলিং স্টপ (আর ফিক্সড TP নেই)
-MAX_HOLD_CANDLES = 60       # সর্বোচ্চ কতগুলো 4H ক্যান্ডেল (~10 দিন) ধরে ট্রেড খোলা রাখা হবে
-OUTPUT_4H = 2200            # ~১ বছর
+SL_ATR_MULT = 2.0           # দৈনিক ATR এমনিতেই বড়, তাই স্টপ একটু চওড়া করা হলো (4H-তে ছিল 1.5)
+BE_TRIGGER_ATR_MULT = 1.5
+TRAIL_ATR_MULT = 2.5
+MAX_HOLD_CANDLES = 40       # সর্বোচ্চ ৪০টা ট্রেডিং দিন (~৮ সপ্তাহ) ধরে ট্রেড খোলা রাখা হবে
+
+# রাউন্ড-ট্রিপ ট্রেডিং কস্ট (স্প্রেড + স্লিপেজ), প্রতি ট্রেডে % হিসেবে — মোটামুটি ধারণা,
+# আপনার আসল ব্রোকারের স্প্রেড অনুযায়ী বদলে নিন। দৈনিক সুইং-এ target বড় বলে এই একই %
+# cost এখন প্রফিটের তুলনায় অনেক কম প্রভাব ফেলবে (4H-এর চেয়ে)।
+ROUND_TRIP_COST_PCT = {
+    "XAUUSD": 0.10,
+    "BTCUSD": 0.05,
+    "USDJPY": 0.02,
+    "GBPUSD": 0.02,
+}
 
 MARKETS = {
     "XAUUSD": {"name": "গোল্ড (XAU/USD)", "symbol": "XAU/USD"},
@@ -310,8 +318,8 @@ def trade_return_pct(direction, entry, exit_price):
 def backtest_market(key, cfg):
     name = cfg["name"]
     print(f"\n{'=' * 60}\n{name} — ডেটা আনা হচ্ছে...")
-    c4 = fetch_candles(cfg["symbol"], "4h", OUTPUT_4H)
-    print(f"{name}: {len(c4)}টা 4H ক্যান্ডেল পাওয়া গেছে")
+    c4 = fetch_candles(cfg["symbol"], CANDLE_INTERVAL, OUTPUT_SIZE)
+    print(f"{name}: {len(c4)}টা দৈনিক ক্যান্ডেল পাওয়া গেছে")
 
     closes = [c[4] for c in c4]
     ema9 = ema_series(closes, EMA_FAST)
@@ -337,7 +345,8 @@ def backtest_market(key, cfg):
     )
     print(
         f"{name}: [ডায়াগনস্টিক] ট্রেন্ড-ফিল্টার পাস: {trend_pass} ক্যান্ডেল | "
-        f"raw EMA crossover: {raw_cross} বার | দুটো একসাথে মিলেছে: {overlap} বার"
+        f"raw EMA crossover: {raw_cross} বার | দুটো একসাথে মিলেছে: {overlap} বার | "
+        f"ধরে নেওয়া round-trip cost: {ROUND_TRIP_COST_PCT.get(key, 0.0):.2f}%/ট্রেড"
     )
 
     trades = []
@@ -369,7 +378,7 @@ def backtest_market(key, cfg):
         initial_sl = entry - SL_ATR_MULT * atr_val if direction == "bull" else entry + SL_ATR_MULT * atr_val
 
         outcome, exit_price, bars = simulate_exit(c4, idx, direction, entry, initial_sl, atr_val)
-        ret = trade_return_pct(direction, entry, exit_price)
+        ret = trade_return_pct(direction, entry, exit_price) - ROUND_TRIP_COST_PCT.get(key, 0.0)
         entry_time = dt.datetime.fromtimestamp(c4[idx][0], tz=dt.timezone.utc)
 
         trades.append(
@@ -378,15 +387,15 @@ def backtest_market(key, cfg):
         )
         next_free_idx = idx + bars + 1
 
-    days = OUTPUT_4H * 4 // 24
+    days = int((c4[-1][0] - c4[0][0]) / 86400) if len(c4) > 1 else 0
     print(f"{name}: মোট {len(trades)}টা ট্রেড (গত ~{days} দিনে)\n")
     for t in trades:
         arrow = "🟢 বাই" if t["direction"] == "bull" else "🔴 সেল"
-        hold_hours = t["bars"] * 4
+        hold_days = t["bars"]  # এখানে প্রতি বার = ১ দৈনিক ক্যান্ডেল
         print(
-            f"  {t['time'].strftime('%Y-%m-%d %H:%M')} UTC — {arrow} [{t['regime']}] "
+            f"  {t['time'].strftime('%Y-%m-%d')} — {arrow} [{t['regime']}] "
             f"@ {t['entry']:,.4f} — {t['outcome']} — রিটার্ন: {t['ret']:+.2f}% "
-            f"({hold_hours}h পরে)"
+            f"({hold_days} দিন পরে)"
         )
 
     if trades:
