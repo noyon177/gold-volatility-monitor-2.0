@@ -1,23 +1,39 @@
-"""EMA ট্রেন্ড রেজিম + ATR ব্রেক-ইভেন/ট্রেইলিং স্টপ — পোর্টফোলিও-লেভেল ব্যাকটেস্ট (v3)
+"""EMA পুলব্যাক ট্রেন্ড-ফলোয়িং (সুইং SL/TP) + RSI রেঞ্জ রিভার্সাল — ব্যাকটেস্ট (v4)
 
-আগের ভার্সনে (v2) প্রতিটা মার্কেট আলাদা-আলাদা ব্যাকটেস্ট করে শেষে শুধু রিটার্ন যোগ করা
-হতো — কিন্তু কম্বাইন্ড রিপোর্টে দেখা গিয়েছিল পোর্টফোলিও ড্রডাউন (-৭৫%) একক-মার্কেট
-ড্রডাউনের (~-১৫%) চেয়ে অনেক বেশি, কারণ মার্কেটগুলোর লস একসাথে ক্লাস্টার করছিল।
+আগের ভার্সনগুলো (v1-v3) ADX-ভিত্তিক ট্রেন্ড ফিল্টার আর ATR-ভিত্তিক স্টপ/ট্রেইলিং দিয়ে
+তৈরি ছিল, যেটা বারবার প্যারামিটার/রিস্ক-লেয়ার পরিবর্তনেও স্থিতিশীল এজ দেখাতে পারেনি।
 
-এই ভার্সনে (v3) পরিবর্তন:
-  1. শুধু ২টা মার্কেট — গোল্ড (XAU/USD) আর বিটকয়েন (BTC/USD)। বাকিগুলো বাদ।
-  2. সিমুলেশন এখন সত্যিকারের পোর্টফোলিও-লেভেল, দিন-ধরে-দিন (event-driven): দুটো মার্কেটের
-     ক্যান্ডেল একসাথে তারিখ অনুযায়ী প্রসেস করা হয়, কারণ নতুন এন্ট্রি নেওয়া যাবে কিনা সেটা
-     এখন অন্য মার্কেটে কী চলছে তার ওপর নির্ভর করে (আগের ভার্সনে প্রতিটা মার্কেট স্বাধীনভাবে
-     চলত, তাই এই নির্ভরতা মডেল করা যেত না)।
-  3. MAX_CONCURRENT_POSITIONS — একই সময়ে সর্বোচ্চ এতগুলো পজিশন খোলা থাকতে পারবে।
-  4. CORRELATION_FILTER — অন্য মার্কেটে ইতিমধ্যে একই দিকে (বাই/সেল) পজিশন খোলা থাকলে নতুন
-     একই-দিকের এন্ট্রি নেওয়া হবে না (ক্লাস্টারড লস কমানোর জন্য)।
-  5. Equity-drawdown cooldown — পোর্টফোলিও রিয়েলাইজড ইকুইটি peak থেকে COOLDOWN_TRIGGER_DD_PCT
-     শতাংশ নিচে নামলে নতুন এন্ট্রি বন্ধ থাকে, যতক্ষণ না ড্রডাউন কমে COOLDOWN_RESUME_DD_PCT-এ
-     ফিরে আসে (hysteresis, যাতে সীমানার কাছে বারবার চালু-বন্ধ না হয়)।
+v4-তে সম্পূর্ণ নতুন এন্ট্রি-এক্সিট লজিক:
 
-চালানোর নিয়ম: TWELVE_DATA_API_KEY=xxxx python backtest_swing_v3.py
+  রেজিম নির্ধারণ (ADX বাদ):
+    - EMA_FAST > EMA_SLOW এবং EMA_FAST উপরের দিকে উঠছে (TREND_SLOPE_LOOKBACK ক্যান্ডেল
+      আগের চেয়ে বেশি) → আপট্রেন্ড
+    - বিপরীত হলে ডাউনট্রেন্ড
+    - কোনোটাই না হলে (EMA দুটো কাছাকাছি/ফ্ল্যাট) → রেঞ্জ
+
+  ট্রেন্ড মার্কেটে এন্ট্রি (পুলব্যাক):
+    - আপট্রেন্ডে দাম fast EMA-তে পুলব্যাক করে (low <= EMA) আবার বন্ধ হয় EMA-এর ওপরে,
+      আর ক্যান্ডেলের বডি দিয়ে সেটা কনফার্ম হয় (close > open) — তাহলে বাই সিগন্যাল
+    - ডাউনট্রেন্ডে মিরর — সেল সিগন্যাল
+    - SL = সর্বশেষ কনফার্মড সুইং লো (আপট্রেন্ড) / সুইং হাই (ডাউনট্রেন্ড)
+    - TP = তার আগের সুইং হাই (আপট্রেন্ড) / সুইং লো (ডাউনট্রেন্ড) — অর্থাৎ পরবর্তী
+      স্ট্রাকচারাল লেভেল পর্যন্ত টার্গেট, ফিক্সড R-মাল্টিপল না
+
+  রেঞ্জ মার্কেটে এন্ট্রি (RSI + প্রাইস অ্যাকশন):
+    - RSI ওভারসোল্ড থেকে উপরে ক্রস করলে (৩০-এর নিচ থেকে ওপরে) আর ক্যান্ডেল বুলিশ হলে
+      (close > open) → বাই, টার্গেট রেঞ্জের ওপরের সুইং হাই, SL রেঞ্জের সুইং লো-এর
+      একটু নিচে (বাফার সহ)
+    - RSI ওভারবট থেকে নিচে ক্রস করলে মিরর → সেল
+
+  সুইং হাই/লো একটা ফ্র্যাক্টাল উইন্ডো (SWING_LOOKBACK ক্যান্ডেল ডানে-বামে) দিয়ে বের করা
+  হয়, কিন্তু ট্রেডিং সিদ্ধান্তে ব্যবহার করা হয় শুধু "কনফার্মড" সুইং পয়েন্ট — অর্থাৎ সেই
+  পয়েন্টের পরের SWING_LOOKBACK ক্যান্ডেল পার হওয়ার পরেই সেটা রেফারেন্স হিসেবে ব্যবহার করা
+  হয়, যাতে ভবিষ্যতের ডেটা দেখে সিদ্ধান্ত নেওয়ার (lookahead bias) ভুল না হয়।
+
+  MIN_REWARD_RISK_RATIO দিয়ে খুব খারাপ risk:reward-এর ট্রেড (যেমন SL/TP প্রায় কাছাকাছি)
+  বাদ দেওয়া হয়।
+
+চালানোর নিয়ম: TWELVE_DATA_API_KEY=xxxx python backtest_swing_v4.py
 """
 import datetime as dt
 import os
@@ -32,32 +48,18 @@ OUTPUT_SIZE = 2500
 
 EMA_FAST = 20
 EMA_SLOW = 50
-ADX_PERIOD = 14
-ADX_THRESHOLD = 25
-ADX_THRESHOLD_OVERRIDE = {}   # XAU/BTC দুটোই ট্রেন্ডি মার্কেট বলে ডিফল্টই রাখা হলো
-ADX_RISING_LOOKBACK = 5
-TREND_ENTRY_MODE = "pullback"
-PULLBACK_BODY_CONFIRM = True
-ATR_PERIOD = 14
-SL_ATR_MULT = 2.0
-BE_TRIGGER_ATR_MULT = 1.5
-TRAIL_ATR_MULT = 2.5
-MAX_HOLD_CANDLES = 40
+TREND_SLOPE_LOOKBACK = 10     # এই কয়টা ক্যান্ডেল আগের তুলনায় EMA_FAST-এর ঢাল দেখে ট্রেন্ড ঠিক হয়
 
-# ---- নতুন: পোর্টফোলিও-লেভেল রিস্ক কন্ট্রোল ----
-MAX_CONCURRENT_POSITIONS = 2     # ২টা মার্কেট বলে এটা কার্যত "উভয়ই একসাথে চলতে পারবে";
-                                  # ভবিষ্যতে মার্কেট বাড়ালে এটা আসল সীমা হিসেবে কাজ করবে
-CORRELATION_FILTER = True        # একই দিকে একাধিক মার্কেটে একসাথে পজিশন নিষেধ
-COOLDOWN_TRIGGER_DD_PCT = 15.0   # পোর্টফোলিও ড্রডাউন এই % ছাড়ালে নতুন এন্ট্রি বন্ধ
-COOLDOWN_RESUME_DD_PCT = 5.0     # ড্রডাউন এই %-এ নেমে এলে আবার এন্ট্রি চালু
-# (বাগ-ফিক্স) আগের ভার্সনে ডেডলক হচ্ছিল: cooldown চালু হলে নতুন ট্রেড বন্ধ হয়ে যায়,
-# কিন্তু ইকুইটি/ড্রডাউন আপডেট হয় শুধু ট্রেড ক্লোজ হলে — তাই নতুন ট্রেড না হলে ড্রডাউনও
-# কখনো কমে না আর cooldown চিরতরে আটকে থাকে (একবার চালু হলে ১৪০টা এন্ট্রি স্কিপ হয়ে
-# পুরো বাকি ব্যাকটেস্ট ট্রেডশূন্য হয়ে গিয়েছিল)। এখন একটা সময়-ভিত্তিক ফোর্সড রিসেট
-# যোগ করা হলো: cooldown শুরুর পর এতদিন পার হয়ে গেলে ড্রডাউন যা-ই থাকুক, cooldown
-# জোর করে উঠে যাবে, যাতে ইকুইটি রিকভারির জন্য নতুন সিগন্যালের সুযোগই না থাকা অবস্থা আর
-# না হয়।
-COOLDOWN_MAX_DAYS = 60
+RSI_PERIOD = 14
+RSI_OVERSOLD = 30
+RSI_OVERBOUGHT = 70
+
+SWING_LOOKBACK = 5            # ফ্র্যাক্টাল সুইং হাই/লো — প্রতিদিকে এতগুলো ক্যান্ডেল
+PULLBACK_BODY_CONFIRM = True
+
+MIN_REWARD_RISK_RATIO = 1.0   # এর কম R:R হলে ট্রেড বাদ
+RANGE_SL_BUFFER_PCT = 0.3     # রেঞ্জ ট্রেডে সুইং লেভেলের বাইরে এই % বাফার
+MAX_HOLD_CANDLES = 40
 
 ROUND_TRIP_COST_PCT = {
     "XAUUSD": 0.10,
@@ -125,17 +127,6 @@ def ema_series(closes, period):
     return out
 
 
-def wilder_smooth_sum(values, period):
-    n = len(values)
-    out = [None] * n
-    if n < period:
-        return out
-    out[period - 1] = sum(values[:period])
-    for i in range(period, n):
-        out[i] = out[i - 1] - out[i - 1] / period + values[i]
-    return out
-
-
 def wilder_avg(values, period):
     n = len(values)
     out = [None] * n
@@ -147,70 +138,95 @@ def wilder_avg(values, period):
     return out
 
 
-def true_range_series(candles):
-    n = len(candles)
-    highs = [c[2] for c in candles]
-    lows = [c[3] for c in candles]
-    closes = [c[4] for c in candles]
-    tr = [0.0] * n
+def calc_rsi(closes, period=RSI_PERIOD):
+    n = len(closes)
+    gains = [0.0] * n
+    losses = [0.0] * n
     for i in range(1, n):
-        tr[i] = max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1]))
-    return tr
-
-
-def calc_atr(candles, period=ATR_PERIOD):
-    return wilder_avg(true_range_series(candles), period)
-
-
-def calc_adx(candles, period=ADX_PERIOD):
-    n = len(candles)
-    highs = [c[2] for c in candles]
-    lows = [c[3] for c in candles]
-    plus_dm = [0.0] * n
-    minus_dm = [0.0] * n
-    tr = true_range_series(candles)
-    for i in range(1, n):
-        up = highs[i] - highs[i - 1]
-        down = lows[i - 1] - lows[i]
-        plus_dm[i] = up if (up > down and up > 0) else 0.0
-        minus_dm[i] = down if (down > up and down > 0) else 0.0
-
-    s_tr = wilder_smooth_sum(tr, period)
-    s_plus = wilder_smooth_sum(plus_dm, period)
-    s_minus = wilder_smooth_sum(minus_dm, period)
-
-    dx = [None] * n
+        change = closes[i] - closes[i - 1]
+        gains[i] = change if change > 0 else 0.0
+        losses[i] = -change if change < 0 else 0.0
+    avg_gain = wilder_avg(gains, period)
+    avg_loss = wilder_avg(losses, period)
+    rsi = [None] * n
     for i in range(n):
-        if s_tr[i]:
-            pdi = 100 * s_plus[i] / s_tr[i]
-            mdi = 100 * s_minus[i] / s_tr[i]
-            denom = pdi + mdi
-            if denom > 0:
-                dx[i] = 100 * abs(pdi - mdi) / denom
-
-    adx = [None] * n
-    valid = [i for i in range(n) if dx[i] is not None]
-    if len(valid) >= period:
-        start = valid[period - 1]
-        adx[start] = sum(dx[i] for i in valid[:period]) / period
-        for i in range(start + 1, n):
-            if dx[i] is None:
-                continue
-            adx[i] = (adx[i - 1] * (period - 1) + dx[i]) / period
-    return adx
+        ag, al = avg_gain[i], avg_loss[i]
+        if ag is None or al is None:
+            continue
+        rsi[i] = 100.0 if al == 0 else 100 - 100 / (1 + ag / al)
+    return rsi
 
 
-def pullback_signal(c4, ema_fast_vals, ema_slow_vals, adx, idx, adx_threshold):
-    ef, es, a = ema_fast_vals[idx], ema_slow_vals[idx], adx[idx]
-    if ef is None or es is None or a is None or a < adx_threshold:
+def find_confirmed_swings(c4, lookback=SWING_LOOKBACK):
+    """ফ্র্যাক্টাল সুইং হাই/লো বের করে, কিন্তু প্রতিটা ইনডেক্সের জন্য রিটার্ন করে শুধু সেই
+    সুইং পয়েন্ট যেটা ততদিনে "কনফার্মড" (অর্থাৎ তার ডানপাশের lookback ক্যান্ডেলও পার হয়ে
+    গেছে) — যাতে ব্যাকটেস্টে ভবিষ্যৎ ডেটা ব্যবহার না হয়ে যায়।"""
+    n = len(c4)
+    raw_high = [None] * n
+    raw_low = [None] * n
+    for i in range(lookback, n - lookback):
+        hi_window = [c4[j][2] for j in range(i - lookback, i + lookback + 1)]
+        if c4[i][2] == max(hi_window):
+            raw_high[i] = c4[i][2]
+        lo_window = [c4[j][3] for j in range(i - lookback, i + lookback + 1)]
+        if c4[i][3] == min(lo_window):
+            raw_low[i] = c4[i][3]
+
+    confirmed_high = [None] * n
+    confirmed_low = [None] * n
+    last_high = None
+    last_low = None
+    for idx in range(n):
+        check_idx = idx - lookback
+        if check_idx >= 0:
+            if raw_high[check_idx] is not None:
+                last_high = raw_high[check_idx]
+            if raw_low[check_idx] is not None:
+                last_low = raw_low[check_idx]
+        confirmed_high[idx] = last_high
+        confirmed_low[idx] = last_low
+    return confirmed_high, confirmed_low
+
+
+def trend_regime(ema_fast, ema_slow, idx, slope_lookback=TREND_SLOPE_LOOKBACK):
+    if idx < slope_lookback:
+        return None
+    ef, es = ema_fast[idx], ema_slow[idx]
+    ef_prev = ema_fast[idx - slope_lookback]
+    if None in (ef, es, ef_prev):
+        return None
+    if ef > es and ef > ef_prev:
+        return "up"
+    if ef < es and ef < ef_prev:
+        return "down"
+    return "range"
+
+
+def trend_pullback_signal(c4, ema_fast, regime, idx):
+    ef = ema_fast[idx]
+    if ef is None:
         return None
     o, hi, lo, cl = c4[idx][1], c4[idx][2], c4[idx][3], c4[idx][4]
-    if ef > es:
+    if regime == "up":
         if lo <= ef and cl > ef and (not PULLBACK_BODY_CONFIRM or cl > o):
             return "bull"
-    else:
+    elif regime == "down":
         if hi >= ef and cl < ef and (not PULLBACK_BODY_CONFIRM or cl < o):
             return "bear"
+    return None
+
+
+def range_rsi_signal(c4, rsi, idx):
+    if idx < 1:
+        return None
+    r0, r1 = rsi[idx - 1], rsi[idx]
+    if r0 is None or r1 is None:
+        return None
+    o, cl = c4[idx][1], c4[idx][4]
+    if r0 < RSI_OVERSOLD <= r1 and cl > o:
+        return "bull"
+    if r0 > RSI_OVERBOUGHT >= r1 and cl < o:
+        return "bear"
     return None
 
 
@@ -219,182 +235,171 @@ def trade_return_pct(direction, entry, exit_price):
     return raw if direction == "bull" else -raw
 
 
-def load_market_data(key, cfg):
-    print(f"{cfg['name']} — ডেটা আনা হচ্ছে...")
+def simulate_fixed_exit(c4, idx, direction, entry, sl, tp, max_hold=MAX_HOLD_CANDLES):
+    """SL/TP ফিক্সড রাখা হয় (কোনো ট্রেইলিং/ব্রেক-ইভেন নেই — সুইং-লেভেল স্ট্রাকচার একবার
+    ঠিক হলে সেটাই ধরে রাখা হয়)। একই ক্যান্ডেলে SL ও TP দুটোই সম্ভব হলে রক্ষণাত্মকভাবে
+    SL আগে ধরা হয়।"""
+    end = min(idx + max_hold, len(c4) - 1)
+    for j in range(idx + 1, end + 1):
+        hi, lo = c4[j][2], c4[j][3]
+        if direction == "bull":
+            if lo <= sl:
+                return "SL", sl, j - idx
+            if hi >= tp:
+                return "TP", tp, j - idx
+        else:
+            if hi >= sl:
+                return "SL", sl, j - idx
+            if lo <= tp:
+                return "TP", tp, j - idx
+    return "TIMEOUT", c4[end][4], end - idx
+
+
+def backtest_market(key, cfg):
+    name = cfg["name"]
+    print(f"\n{'=' * 60}\n{name} — ডেটা আনা হচ্ছে...")
     c4 = fetch_candles(cfg["symbol"], CANDLE_INTERVAL, OUTPUT_SIZE)
+    print(f"{name}: {len(c4)}টা দৈনিক ক্যান্ডেল পাওয়া গেছে")
+
     closes = [c[4] for c in c4]
     ema_f = ema_series(closes, EMA_FAST)
     ema_s = ema_series(closes, EMA_SLOW)
-    adx = calc_adx(c4, ADX_PERIOD)
-    atr = calc_atr(c4, ATR_PERIOD)
-    warmup = max(EMA_SLOW, ADX_PERIOD, ATR_PERIOD) + 10
-    date_idx = {}
-    for i in range(warmup, len(c4)):
-        date_str = dt.datetime.fromtimestamp(c4[i][0], tz=dt.timezone.utc).strftime("%Y-%m-%d")
-        date_idx[date_str] = i
-    print(f"{cfg['name']}: {len(c4)}টা ক্যান্ডেল, স্ক্যান শুরু {date_idx and sorted(date_idx)[0]} থেকে")
-    return {"c4": c4, "ema_f": ema_f, "ema_s": ema_s, "adx": adx, "atr": atr, "date_idx": date_idx}
+    rsi = calc_rsi(closes, RSI_PERIOD)
+    swing_high, swing_low = find_confirmed_swings(c4, SWING_LOOKBACK)
 
+    warmup = max(EMA_SLOW, RSI_PERIOD) + TREND_SLOPE_LOOKBACK + 10
+    scan_range = range(warmup, len(c4) - MAX_HOLD_CANDLES)
 
-def run_portfolio_backtest(all_data):
-    all_dates = sorted(set().union(*[d["date_idx"].keys() for d in all_data.values()]))
+    trades = []
+    trend_signal_count = 0
+    range_signal_count = 0
+    skipped_bad_rr = 0
+    next_free_idx = 0
 
-    open_trades = {}      # market -> trade dict
-    trades_log = []        # বন্ধ হওয়া সব ট্রেড
-    equity = 0.0
-    peak = 0.0
-    in_cooldown = False
-    cooldown_start = None       # (নতুন) cooldown কবে শুরু হয়েছিল
-    cooldown_activations = 0
-    cooldown_forced_resumes = 0  # (নতুন) সময়সীমা পার হয়ে জোর করে কতবার রিসেট হলো
-    skipped_for_cooldown = 0
-    skipped_for_correlation = 0
-    skipped_for_max_positions = 0
-
-    for date in all_dates:
-        date_obj = dt.datetime.strptime(date, "%Y-%m-%d").date()
-
-        # (নতুন) ডেডলক-প্রতিরোধ: cooldown অনেকদিন ধরে চালু থাকলে জোর করে বন্ধ করে দেওয়া,
-        # যাতে ট্রেডশূন্য অবস্থায় চিরস্থায়ী আটকে না থাকে
-        if in_cooldown and cooldown_start is not None and (date_obj - cooldown_start).days >= COOLDOWN_MAX_DAYS:
-            in_cooldown = False
-            cooldown_start = None
-            cooldown_forced_resumes += 1
-
-        for market, data in all_data.items():
-            if date not in data["date_idx"]:
-                continue
-            idx = data["date_idx"][date]
-            c4, adx, atr = data["c4"], data["adx"], data["atr"]
-
-            if market in open_trades:
-                trade = open_trades[market]
-                hi, lo, cl = c4[idx][2], c4[idx][3], c4[idx][4]
-                direction = trade["direction"]
-                sl = trade["sl"]
-                trade["bars"] += 1
-                hit_sl = lo <= sl if direction == "bull" else hi >= sl
-                timed_out = trade["bars"] >= MAX_HOLD_CANDLES
-
-                if hit_sl or timed_out:
-                    if hit_sl:
-                        exit_price = sl
-                        outcome = "SL" if not trade["moved_be"] else (
-                            "BE" if abs(sl - trade["entry"]) < 1e-9 else "TRAIL")
-                    else:
-                        exit_price = cl
-                        outcome = "TIMEOUT"
-                    ret = trade_return_pct(direction, trade["entry"], exit_price) - ROUND_TRIP_COST_PCT.get(market, 0.0)
-                    equity += ret
-                    peak = max(peak, equity)
-                    dd = peak - equity
-                    if dd >= COOLDOWN_TRIGGER_DD_PCT and not in_cooldown:
-                        in_cooldown = True
-                        cooldown_start = date_obj
-                        cooldown_activations += 1
-                    elif dd <= COOLDOWN_RESUME_DD_PCT and in_cooldown:
-                        in_cooldown = False
-                        cooldown_start = None
-                    trades_log.append({
-                        "market": market, "direction": direction, "entry": trade["entry"],
-                        "entry_time": trade["entry_time"], "exit_time": date,
-                        "outcome": outcome, "ret": ret, "bars": trade["bars"],
-                    })
-                    del open_trades[market]
-                    continue
-                else:
-                    if direction == "bull":
-                        if hi > trade["extreme"]:
-                            trade["extreme"] = hi
-                        if not trade["moved_be"] and trade["extreme"] - trade["entry"] >= BE_TRIGGER_ATR_MULT * trade["atr_val"]:
-                            trade["sl"] = max(trade["sl"], trade["entry"])
-                            trade["moved_be"] = True
-                        if trade["moved_be"]:
-                            trade["sl"] = max(trade["sl"], trade["extreme"] - TRAIL_ATR_MULT * trade["atr_val"])
-                    else:
-                        if lo < trade["extreme"]:
-                            trade["extreme"] = lo
-                        if not trade["moved_be"] and trade["entry"] - trade["extreme"] >= BE_TRIGGER_ATR_MULT * trade["atr_val"]:
-                            trade["sl"] = min(trade["sl"], trade["entry"])
-                            trade["moved_be"] = True
-                        if trade["moved_be"]:
-                            trade["sl"] = min(trade["sl"], trade["extreme"] + TRAIL_ATR_MULT * trade["atr_val"])
-                    continue
-
-            # কোনো ওপেন ট্রেড নেই এই মার্কেটে — নতুন এন্ট্রি সিগন্যাল চেক
-            if adx[idx] is None or atr[idx] is None:
-                continue
-            threshold = ADX_THRESHOLD_OVERRIDE.get(market, ADX_THRESHOLD)
-            direction = pullback_signal(c4, data["ema_f"], data["ema_s"], adx, idx, threshold)
-            if not direction:
-                continue
-
-            if in_cooldown:
-                skipped_for_cooldown += 1
-                continue
-            if len(open_trades) >= MAX_CONCURRENT_POSITIONS:
-                skipped_for_max_positions += 1
-                continue
-            if CORRELATION_FILTER and any(t["direction"] == direction for t in open_trades.values()):
-                skipped_for_correlation += 1
-                continue
-
-            entry = c4[idx][4]
-            atr_val = atr[idx]
-            sl = entry - SL_ATR_MULT * atr_val if direction == "bull" else entry + SL_ATR_MULT * atr_val
-            open_trades[market] = {
-                "direction": direction, "entry": entry, "sl": sl, "atr_val": atr_val,
-                "moved_be": False, "extreme": entry, "bars": 0, "entry_time": date,
-            }
-
-    return (trades_log, equity, cooldown_activations, cooldown_forced_resumes,
-            skipped_for_cooldown, skipped_for_correlation, skipped_for_max_positions)
-
-
-def print_report(trades_log, final_equity, cooldown_activations, cooldown_forced_resumes, skip_cd, skip_corr, skip_max):
-    print(f"\n{'=' * 60}\nপোর্টফোলিও রিপোর্ট (XAU + BTC, একসাথে, ম্যাক্স {MAX_CONCURRENT_POSITIONS} পজিশন)")
-    print(f"মোট ট্রেড: {len(trades_log)}")
-
-    for market in MARKETS:
-        subset = [t for t in trades_log if t["market"] == market]
-        if not subset:
-            print(f"  {MARKETS[market]['name']}: 0টা ট্রেড")
+    for idx in scan_range:
+        if idx < next_free_idx:
             continue
-        wins = sum(1 for t in subset if t["ret"] > 0)
-        total = sum(t["ret"] for t in subset)
-        avg = total / len(subset)
-        print(f"  {MARKETS[market]['name']}: {len(subset)}টা ট্রেড | win rate {wins}/{len(subset)} "
-              f"({wins/len(subset)*100:.0f}%) | গড় রিটার্ন {avg:+.2f}% | মোট রিটার্ন {total:+.2f}%")
 
-    # কম্বাইন্ড ইকুইটি কার্ভ ও ড্রডাউন (বন্ধ হওয়ার তারিখ অনুযায়ী)
-    ordered = sorted(trades_log, key=lambda t: t["exit_time"])
-    equity = 0.0
-    peak = 0.0
-    max_dd = 0.0
-    dd_start = dd_end = None
-    peak_time = ordered[0]["exit_time"] if ordered else None
-    for t in ordered:
-        equity += t["ret"]
-        if equity > peak:
-            peak = equity
-            peak_time = t["exit_time"]
-        dd = peak - equity
-        if dd > max_dd:
-            max_dd = dd
-            dd_start, dd_end = peak_time, t["exit_time"]
+        regime = trend_regime(ema_f, ema_s, idx)
+        if regime is None:
+            continue
 
-    print(f"\n  কম্বাইন্ড মোট রিটার্ন: {final_equity:+.2f}%")
-    print(f"  কম্বাইন্ড সর্বোচ্চ ড্রডাউন: -{max_dd:.2f}%"
-          + (f" ({dd_start} থেকে {dd_end})" if dd_start else ""))
-    print(f"  Cooldown চালু হয়েছে: {cooldown_activations} বার | সময়সীমা পার হয়ে জোর করে রিসেট: {cooldown_forced_resumes} বার "
-          f"(অর্থাৎ ড্রডাউন না কমেও {COOLDOWN_MAX_DAYS} দিন পর আবার এন্ট্রি চালু হয়েছে)")
-    print(f"  স্কিপ হওয়া এন্ট্রি — cooldown: {skip_cd} | correlation filter: {skip_corr} | max positions: {skip_max}")
+        direction = None
+        mode = None
+        sl = tp = None
+        entry = c4[idx][4]
+
+        if regime in ("up", "down"):
+            direction = trend_pullback_signal(c4, ema_f, regime, idx)
+            if direction:
+                mode = "ট্রেন্ড-পুলব্যাক"
+                if direction == "bull":
+                    sl, tp = swing_low[idx], swing_high[idx]
+                else:
+                    sl, tp = swing_high[idx], swing_low[idx]
+        else:  # range
+            direction = range_rsi_signal(c4, rsi, idx)
+            if direction:
+                mode = "রেঞ্জ-RSI"
+                if direction == "bull":
+                    sl = swing_low[idx] * (1 - RANGE_SL_BUFFER_PCT / 100) if swing_low[idx] else None
+                    tp = swing_high[idx]
+                else:
+                    sl = swing_high[idx] * (1 + RANGE_SL_BUFFER_PCT / 100) if swing_high[idx] else None
+                    tp = swing_low[idx]
+
+        if not direction:
+            continue
+        if mode == "ট্রেন্ড-পুলব্যাক":
+            trend_signal_count += 1
+        else:
+            range_signal_count += 1
+
+        if sl is None or tp is None:
+            continue
+        # বৈধতা: SL/TP সঠিক দিকে আছে কিনা, আর reward:risk যথেষ্ট কিনা
+        if direction == "bull":
+            if not (sl < entry < tp):
+                continue
+            risk = entry - sl
+            reward = tp - entry
+        else:
+            if not (tp < entry < sl):
+                continue
+            risk = sl - entry
+            reward = entry - tp
+        if risk <= 0 or reward / risk < MIN_REWARD_RISK_RATIO:
+            skipped_bad_rr += 1
+            continue
+
+        outcome, exit_price, bars = simulate_fixed_exit(c4, idx, direction, entry, sl, tp)
+        ret = trade_return_pct(direction, entry, exit_price) - ROUND_TRIP_COST_PCT.get(key, 0.0)
+        entry_time = dt.datetime.fromtimestamp(c4[idx][0], tz=dt.timezone.utc)
+
+        trades.append({
+            "time": entry_time, "market": key, "direction": direction, "mode": mode,
+            "entry": entry, "sl": sl, "tp": tp, "outcome": outcome, "ret": ret, "bars": bars,
+        })
+        next_free_idx = idx + bars + 1
+
+    print(f"{name}: ট্রেন্ড-সিগন্যাল {trend_signal_count} | রেঞ্জ-সিগন্যাল {range_signal_count} | "
+          f"খারাপ R:R বাদ {skipped_bad_rr} | মোট ট্রেড নেওয়া হয়েছে {len(trades)}\n")
+    for t in trades:
+        arrow = "🟢 বাই" if t["direction"] == "bull" else "🔴 সেল"
+        print(f"  {t['time'].strftime('%Y-%m-%d')} — {arrow} [{t['mode']}] @ {t['entry']:,.4f} "
+              f"(SL {t['sl']:,.4f} / TP {t['tp']:,.4f}) — {t['outcome']} — রিটার্ন: {t['ret']:+.2f}% "
+              f"({t['bars']} দিন পরে)")
+
+    if trades:
+        wins = [t for t in trades if t["ret"] > 0]
+        total_ret = sum(t["ret"] for t in trades)
+        print(f"\n  মোট ট্রেড: {len(trades)} | win rate {len(wins)}/{len(trades)} "
+              f"({len(wins)/len(trades)*100:.0f}%) | গড় রিটার্ন {total_ret/len(trades):+.2f}% "
+              f"| মোট রিটার্ন {total_ret:+.2f}%")
+        for label in ("ট্রেন্ড-পুলব্যাক", "রেঞ্জ-RSI"):
+            subset = [t for t in trades if t["mode"] == label]
+            if subset:
+                w = sum(1 for t in subset if t["ret"] > 0)
+                print(f"    শুধু {label}: {len(subset)}টা, win {w}/{len(subset)} "
+                      f"({w/len(subset)*100:.0f}%), গড় রিটার্ন {sum(t['ret'] for t in subset)/len(subset):+.2f}%")
+
+        equity, peak, max_dd = 0.0, 0.0, 0.0
+        for t in trades:
+            equity += t["ret"]
+            peak = max(peak, equity)
+            max_dd = max(max_dd, peak - equity)
+        print(f"  সর্বোচ্চ ড্রডাউন: -{max_dd:.2f}%")
+    return trades
 
 
 def main():
-    all_data = {key: load_market_data(key, cfg) for key, cfg in MARKETS.items()}
-    trades_log, final_equity, cd_act, cd_forced, skip_cd, skip_corr, skip_max = run_portfolio_backtest(all_data)
-    print_report(trades_log, final_equity, cd_act, cd_forced, skip_cd, skip_corr, skip_max)
+    all_trades = {}
+    for key, cfg in MARKETS.items():
+        try:
+            all_trades[key] = backtest_market(key, cfg)
+        except Exception as e:  # noqa: BLE001
+            print(f"{cfg['name']}: ত্রুটি - {e}")
+
+    print(f"\n{'=' * 60}\nসারসংক্ষেপ")
+    flat = []
+    for key, cfg in MARKETS.items():
+        trades = all_trades.get(key, [])
+        if not trades:
+            print(f"  {cfg['name']}: 0টা ট্রেড")
+            continue
+        wins = sum(1 for t in trades if t["ret"] > 0)
+        total = sum(t["ret"] for t in trades)
+        print(f"  {cfg['name']}: {len(trades)}টা ট্রেড, win rate {wins}/{len(trades)}, মোট রিটার্ন {total:+.2f}%")
+        flat.extend(trades)
+
+    if flat:
+        flat.sort(key=lambda t: t["time"])
+        equity, peak, max_dd = 0.0, 0.0, 0.0
+        for t in flat:
+            equity += t["ret"]
+            peak = max(peak, equity)
+            max_dd = max(max_dd, peak - equity)
+        print(f"\n  কম্বাইন্ড (XAU+BTC) মোট রিটার্ন: {equity:+.2f}% | কম্বাইন্ড সর্বোচ্চ ড্রডাউন: -{max_dd:.2f}%")
 
 
 if __name__ == "__main__":
