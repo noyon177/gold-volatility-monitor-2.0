@@ -1,1 +1,23 @@
-{"position": null, "last_processed_date": "2026-09-27", "heartbeat": "2026-09-27", "m": {"XAU": {"level": 2, "last_alert": 1790550463.4684534, "calm_since": 1790559658.3849165, "fails": 0, "down": false, "count": 2}, "BTC": {"level": 2, "last_alert": 1790559508.7782784, "calm_since": 0, "fails": 0, "down": false, "count": 2}}}
+{
+  "position": null,
+  "last_processed_date": "2026-09-28",
+  "heartbeat": "2026-09-27",
+  "m": {
+    "XAU": {
+      "level": 2,
+      "last_alert": 1790550463.4684534,
+      "calm_since": 1790559658.3849165,
+      "fails": 0,
+      "down": false,
+      "count": 2
+    },
+    "BTC": {
+      "level": 2,
+      "last_alert": 1790559508.7782784,
+      "calm_since": 0,
+      "fails": 0,
+      "down": false,
+      "count": 2
+    }
+  }
+}
