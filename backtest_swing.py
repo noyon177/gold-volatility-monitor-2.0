@@ -5,6 +5,9 @@
     বুলিশ Marubozu বা Hammer এলে BUY
   - EMA9 নিচে ক্রস করলে (বেয়ারিশ ক্রস) → এর পর CROSS_WINDOW ক্যান্ডেলের মধ্যে
     বেয়ারিশ Marubozu বা Hanging Man এলে SELL
+  - অ্যাঙ্গেল ফিল্টার: সিগন্যাল ক্যান্ডেলে EMA9 বুলিশে ৬০–৭৫° উপরে / বেয়ারিশে ৬০–৭৫° নিচে
+    ঢালু থাকতে হবে (রেঞ্জ মার্কেট বাদ)। ডিগ্রি চার্টের স্কেলের ওপর নির্ভর করে, তাই
+    CHART_WINDOW / CHART_ASPECT / ANGLE_LOOKBACK দিয়ে স্কেল ঠিক করা হয়
   - SL = সিগন্যাল ক্যান্ডেলের low (BUY) / high (SELL)
   - TP = ঝুঁকির ২ গুণ (1:2)
   - এন্ট্রি = সিগন্যাল ক্যান্ডেলের পরের ক্যান্ডেলের ওপেনে (বাস্তবসম্মত)
@@ -14,6 +17,7 @@
   TWELVE_DATA_API_KEY=xxxx python backtest_ema_candle_15m.py
 """
 import datetime as dt
+import math
 import os
 import time
 
@@ -30,6 +34,14 @@ EMA_FAST = 9
 EMA_SLOW = 15
 CROSS_WINDOW = 10              # ক্রসের পর কত ক্যান্ডেলের মধ্যে সিগন্যাল বৈধ
 ONE_TRADE_PER_CROSS = True     # প্রতিটা ক্রসে সর্বোচ্চ একটা ট্রেড
+
+# EMA9-এর ঢাল (অ্যাঙ্গেল) ফিল্টার — রেঞ্জ মার্কেট বাদ দিতে
+USE_ANGLE_FILTER = True
+ANGLE_MIN = 60                 # ডিগ্রি
+ANGLE_MAX = 75                 # ডিগ্রি
+ANGLE_LOOKBACK = 3             # কত ক্যান্ডেলের ঢাল মাপবে
+CHART_WINDOW = 100             # চার্টে কতগুলো ক্যান্ডেল দেখা যাচ্ছে ধরা হচ্ছে (দামের স্কেল এর থেকে বের হয়)
+CHART_ASPECT = 2.0             # চার্টের প্রস্থ : উচ্চতা অনুপাত
 
 # ক্যান্ডেল প্যাটার্নের সংজ্ঞা
 MARUBOZU_BODY_RATIO = 0.90     # বডি >= পুরো রেঞ্জের ৯০%
@@ -103,6 +115,20 @@ def ema_series(closes, period):
     return out
 
 
+def ema_angle(c, ema, i):
+    """EMA-র ঢাল ডিগ্রিতে (চার্টে চোখে যেমন দেখা যায় তেমন)। উঠলে +, নামলে −।
+    দামের অক্ষ = শেষ CHART_WINDOW ক্যান্ডেলের high-low রেঞ্জ, সময়ের অক্ষ = CHART_WINDOW ক্যান্ডেল,
+    আর প্রস্থ:উচ্চতা = CHART_ASPECT ধরে হিসাব।"""
+    if i < ANGLE_LOOKBACK or ema[i] is None or ema[i - ANGLE_LOOKBACK] is None:
+        return None
+    win = c[max(0, i - CHART_WINDOW + 1): i + 1]
+    rng = max(x[2] for x in win) - min(x[3] for x in win)
+    if rng <= 0:
+        return None
+    tan_a = (ema[i] - ema[i - ANGLE_LOOKBACK]) / rng * (CHART_WINDOW / ANGLE_LOOKBACK) / CHART_ASPECT
+    return math.degrees(math.atan(tan_a))
+
+
 def candle_patterns(c):
     """একটা ক্যান্ডেল থেকে প্যাটার্ন লিস্ট রিটার্ন করে: [(নাম, দিক), ...]
     দিক: 'bull' মানে বাই-সাপোর্ট, 'bear' মানে সেল-সাপোর্ট।"""
@@ -173,6 +199,8 @@ def main():
     last_cross_dir = None
     used_cross = None
     next_free = 0
+    angles_seen = []      # প্যাটার্ন মিলেছে এমন সব সিগন্যালের অ্যাঙ্গেল (দিক অনুযায়ী ধনাত্মক)
+    skipped_angle = 0
     warmup = EMA_SLOW + 5
 
     for i in range(warmup, len(c) - 1):
@@ -194,6 +222,18 @@ def main():
         pats = [name for name, d in candle_patterns(c[i]) if d == last_cross_dir]
         if not pats:
             continue
+
+        # অ্যাঙ্গেল ফিল্টার: বুলিশে +৬০..+৭৫°, বেয়ারিশে −৬০..−৭৫°
+        ang = ema_angle(c, ef, i)
+        if ang is not None:
+            angles_seen.append(ang if last_cross_dir == "bull" else -ang)
+        if USE_ANGLE_FILTER:
+            if ang is None:
+                continue
+            signed = ang if last_cross_dir == "bull" else -ang
+            if not (ANGLE_MIN <= signed <= ANGLE_MAX):
+                skipped_angle += 1
+                continue
 
         direction = last_cross_dir
         entry_idx = i + 1
@@ -228,6 +268,16 @@ def main():
               f"SL {t['sl']:,.2f} TP {t['tp']:,.2f} → {t['outcome']} {t['ret']:+.2f}% ({t['r']:+.2f}R)")
 
     print(f"\n{'=' * 60}\nসারসংক্ষেপ")
+    if angles_seen:
+        s = sorted(angles_seen)
+        pick = lambda p: s[min(len(s) - 1, int(len(s) * p))]  # noqa: E731
+        print(f"অ্যাঙ্গেল ডায়াগনস্টিক ({len(s)}টা প্যাটার্ন-সিগন্যাল, দিক অনুযায়ী): "
+              f"মিন {s[0]:.0f}° | ২৫% {pick(0.25):.0f}° | মিডিয়ান {pick(0.5):.0f}° | "
+              f"৭৫% {pick(0.75):.0f}° | ৯০% {pick(0.9):.0f}° | ম্যাক্স {s[-1]:.0f}°")
+        in_range = sum(1 for a in s if ANGLE_MIN <= a <= ANGLE_MAX)
+        print(f"  {ANGLE_MIN}–{ANGLE_MAX}° রেঞ্জে পড়েছে {in_range}টা | অ্যাঙ্গেলের কারণে বাদ {skipped_angle}টা")
+        if in_range < 30:
+            print("  ⚠ সিগন্যাল খুব কম — CHART_WINDOW/ANGLE_LOOKBACK/CHART_ASPECT বদলে ডিগ্রির স্কেল মিলিয়ে নিন")
     report("মোট", trades)
     for p in ("Marubozu", "Hammer", "HangingMan"):
         report(f"  {p}", [t for t in trades if t["pattern"] == p])
