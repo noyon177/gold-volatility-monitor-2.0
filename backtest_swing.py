@@ -1,20 +1,20 @@
-"""EMA9/EMA15 ক্রসওভার + স্ট্রং ক্যান্ডেল (Marubozu / Hammer / Hanging Man) — ১৫ মিনিট ব্যাকটেস্ট
+"""EMA9/EMA15 ক্রসওভার + স্ট্রং ক্যান্ডেল — ১৫ মিনিট ব্যাকটেস্ট (সংশোধিত সংস্করণ)
 
 কৌশল:
-  - EMA9 উপরে ক্রস করলে (বুলিশ ক্রস) → এর পর CROSS_WINDOW ক্যান্ডেলের মধ্যে
-    বুলিশ Marubozu বা Hammer এলে BUY
-  - EMA9 নিচে ক্রস করলে (বেয়ারিশ ক্রস) → এর পর CROSS_WINDOW ক্যান্ডেলের মধ্যে
-    বেয়ারিশ Marubozu বা Hanging Man এলে SELL
-  - অ্যাঙ্গেল ফিল্টার: সিগন্যাল ক্যান্ডেলে EMA9 বুলিশে ৬০–৭৫° উপরে / বেয়ারিশে ৬০–৭৫° নিচে
-    ঢালু থাকতে হবে (রেঞ্জ মার্কেট বাদ)। ডিগ্রি চার্টের স্কেলের ওপর নির্ভর করে, তাই
-    CHART_WINDOW / CHART_ASPECT / ANGLE_LOOKBACK দিয়ে স্কেল ঠিক করা হয়
-  - SL = সিগন্যাল ক্যান্ডেলের low (BUY) / high (SELL)
-  - TP = ঝুঁকির ২ গুণ (1:2)
-  - এন্ট্রি = সিগন্যাল ক্যান্ডেলের পরের ক্যান্ডেলের ওপেনে (বাস্তবসম্মত)
-  - একই ক্যান্ডেলে SL ও TP দুটোই ছুঁলে SL আগে ধরা হয় (রক্ষণশীল)
+  - EMA9 উপরে ক্রস (বুলিশ) → CROSS_WINDOW ক্যান্ডেলের মধ্যে বুলিশ Marubozu বা Hammer এলে BUY
+  - EMA9 নিচে ক্রস (বেয়ারিশ) → CROSS_WINDOW ক্যান্ডেলের মধ্যে বেয়ারিশ Marubozu বা
+    Shooting Star (BEAR_WICK_PATTERN দিয়ে HangingMan-ও বেছে নেওয়া যায়) এলে SELL
+  - অ্যাঙ্গেল ফিল্টার: EMA9-এর ঢাল ATR-এর সাপেক্ষে মাপা হয় (স্কেল স্থির, ১০০ ক্যান্ডেলের রেঞ্জের ওপর নির্ভর করে না)
+  - SR ফিল্টার: শুধু অভাঙা (unbroken) কনফার্মড সুইং লেভেল
+  - SL = সিগন্যাল ক্যান্ডেলের low/high, TP = ঝুঁকির RR গুণ
+  - এন্ট্রি = পরের ক্যান্ডেলের ওপেন; একই ক্যান্ডেলে SL ও TP দুটো ছুঁলে SL আগে
+  - গ্যাপে SL পার হলে ওপেন প্রাইসে বের হয় (খারাপ ফিল ধরা হয়)
+  - খরচ % ও R দুটোতেই ধরা হয়; equity/drawdown R-ভিত্তিক (প্রতি ট্রেডে সমান ঝুঁকি)
+  - শেষের চলমান (অসম্পূর্ণ) ক্যান্ডেল বাদ
+  - ইন-স্যাম্পল / আউট-অব-স্যাম্পল আলাদা রিপোর্ট
 
-চালানোর নিয়ম:
-  TWELVE_DATA_API_KEY=xxxx python backtest_ema_candle_15m.py
+চালানো:
+  TWELVE_DATA_API_KEY=xxxx python backtest_ema_candle_15m_fixed.py
 """
 import datetime as dt
 import math
@@ -27,32 +27,43 @@ TWELVE_DATA_KEY = os.environ["TWELVE_DATA_API_KEY"]
 
 SYMBOL = "BTC/USD"
 INTERVAL = "15min"
-TOTAL_CANDLES = 15000          # মোট কত ক্যান্ডেল আনবে (১৫০০০ ≈ ১৫৬ দিন)
-CHUNK = 5000                   # প্রতি রিকোয়েস্টে সর্বোচ্চ
+TOTAL_CANDLES = 15000
+CHUNK = 5000
 
 EMA_FAST = 9
 EMA_SLOW = 15
-CROSS_WINDOW = 10              # ক্রসের পর কত ক্যান্ডেলের মধ্যে সিগন্যাল বৈধ
-ONE_TRADE_PER_CROSS = True     # প্রতিটা ক্রসে সর্বোচ্চ একটা ট্রেড
+CROSS_WINDOW = 10
+ONE_TRADE_PER_CROSS = True
 
-# EMA9-এর ঢাল (অ্যাঙ্গেল) ফিল্টার — রেঞ্জ মার্কেট বাদ দিতে
+# অ্যাঙ্গেল ফিল্টার (ATR-ভিত্তিক স্কেল)
 USE_ANGLE_FILTER = True
-ANGLE_MIN = 60                 # ডিগ্রি
-ANGLE_MAX = 75                 # ডিগ্রি
-ANGLE_LOOKBACK = 3             # কত ক্যান্ডেলের ঢাল মাপবে
-CHART_WINDOW = 100             # চার্টে কতগুলো ক্যান্ডেল দেখা যাচ্ছে ধরা হচ্ছে (দামের স্কেল এর থেকে বের হয়)
-CHART_ASPECT = 2.0             # চার্টের প্রস্থ : উচ্চতা অনুপাত
+ANGLE_MIN = 60
+ANGLE_MAX = 90                 # ৭৫°-এর ওপরের শক্তিশালী মুভও ধরা হবে
+ANGLE_LOOKBACK = 3
+ATR_PERIOD = 14
+ANGLE_SCALE = 4.0              # বড় করলে একই ঢালে ডিগ্রি বাড়ে। ডায়াগনস্টিক দেখে ঠিক করুন
+                               # (tan(অ্যাঙ্গেল) = ATR-এককে প্রতি ক্যান্ডেল ঢাল × ANGLE_SCALE)
 
-# ক্যান্ডেল প্যাটার্নের সংজ্ঞা
-MARUBOZU_BODY_RATIO = 0.90     # বডি >= পুরো রেঞ্জের ৯০%
-HAMMER_LOWER_WICK_X = 2.0      # নিচের উইক >= বডির ২ গুণ
-HAMMER_UPPER_WICK_MAX = 0.3    # উপরের উইক <= বডির ৩০% (Hanging Man-এ উল্টো দিক)
-MIN_BODY_RATIO = 0.10          # বডি রেঞ্জের অন্তত ১০% (ডোজি বাদ)
+# সাপোর্ট / রেজিস্ট্যান্স
+USE_SR_FILTER = True
+SR_SWING_LOOKBACK = 5
+SR_LOOKBACK_CANDLES = 500
+SR_TOUCH_TOL_PCT = 0.30
+SR_BLOCK_TP = False
 
-RR = 2.0                       # রিওয়ার্ড : রিস্ক
-MIN_RISK_PCT = 0.05            # SL খুব কাছে হলে (এন্ট্রির % হিসেবে) ট্রেড বাদ
-MAX_HOLD_CANDLES = 96          # ২৪ ঘণ্টা
-ROUND_TRIP_COST_PCT = 0.05     # স্প্রেড+ফি (এন্ট্রির %)
+# ক্যান্ডেল প্যাটার্ন
+MARUBOZU_BODY_RATIO = 0.90
+WICK_LONG_X = 2.0              # লম্বা উইক >= বডির ২ গুণ
+WICK_SHORT_MAX = 0.3           # উল্টো দিকের উইক <= বডির ৩০%
+MIN_BODY_RATIO = 0.10
+BEAR_WICK_PATTERN = "ShootingStar"   # "ShootingStar" (যুক্তিসঙ্গত) বা "HangingMan" (আগের আচরণ)
+
+RR = 2.0
+MIN_RISK_PCT = 0.05
+MAX_HOLD_CANDLES = None
+ROUND_TRIP_COST_PCT = 0.05
+
+IS_FRACTION = 0.7              # প্রথম ৭০% ইন-স্যাম্পল, বাকি ৩০% আউট-অব-স্যাম্পল
 
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
@@ -71,7 +82,7 @@ def get_json(url, params, tries=3):
 
 
 def fetch_candles(symbol, interval, total, chunk=CHUNK):
-    """(time, open, high, low, close) লিস্ট, পুরোনো থেকে নতুন। end_date দিয়ে পেছনে পেজিনেশন।"""
+    """(time, open, high, low, close), পুরোনো → নতুন। শেষের চলমান ক্যান্ডেল বাদ।"""
     data_map = {}
     end_date = None
     while len(data_map) < total:
@@ -79,8 +90,17 @@ def fetch_candles(symbol, interval, total, chunk=CHUNK):
                   "timezone": "UTC", "apikey": TWELVE_DATA_KEY}
         if end_date:
             params["end_date"] = end_date
-        data = get_json("https://api.twelvedata.com/time_series", params)
+        try:
+            data = get_json("https://api.twelvedata.com/time_series", params)
+        except RuntimeError:
+            if data_map:
+                print("⚠ ডেটা আনতে সমস্যা, এ পর্যন্ত যা এসেছে তা নিয়ে চলছে")
+                break
+            raise
         if data.get("status") == "error":
+            if data_map:  # পুরোনো ডেটা ফুরিয়ে গেলে এরর আসে
+                print("ℹ আর পুরোনো ডেটা নেই:", str(data.get("message", ""))[:100])
+                break
             raise RuntimeError("Twelve Data: " + str(data.get("message", "error"))[:150])
         rows = data.get("values", [])
         if not rows:
@@ -90,14 +110,14 @@ def fetch_candles(symbol, interval, total, chunk=CHUNK):
             data_map[r["datetime"]] = r
         if len(data_map) == before:
             break
-        earliest = min(r["datetime"] for r in rows)
-        end_date = earliest
-        time.sleep(8)  # ফ্রি প্ল্যানের রেট লিমিট এড়াতে
+        end_date = min(r["datetime"] for r in rows)
+        time.sleep(8)
     out = []
     for k in sorted(data_map):
         r = data_map[k]
         t = dt.datetime.strptime(k, "%Y-%m-%d %H:%M:%S").replace(tzinfo=dt.timezone.utc)
         out.append((t, float(r["open"]), float(r["high"]), float(r["low"]), float(r["close"])))
+    out = out[:-1]  # শেষ ক্যান্ডেল এখনো চলমান থাকতে পারে
     return out[-total:]
 
 
@@ -115,60 +135,119 @@ def ema_series(closes, period):
     return out
 
 
-def ema_angle(c, ema, i):
-    """EMA-র ঢাল ডিগ্রিতে (চার্টে চোখে যেমন দেখা যায় তেমন)। উঠলে +, নামলে −।
-    দামের অক্ষ = শেষ CHART_WINDOW ক্যান্ডেলের high-low রেঞ্জ, সময়ের অক্ষ = CHART_WINDOW ক্যান্ডেল,
-    আর প্রস্থ:উচ্চতা = CHART_ASPECT ধরে হিসাব।"""
+def atr_series(c, period=ATR_PERIOD):
+    """Wilder ATR।"""
+    n = len(c)
+    out = [None] * n
+    if n <= period:
+        return out
+    tr = [None] * n
+    for i in range(1, n):
+        h, lo, pc = c[i][2], c[i][3], c[i - 1][4]
+        tr[i] = max(h - lo, abs(h - pc), abs(lo - pc))
+    prev = sum(tr[1:period + 1]) / period
+    out[period] = prev
+    for i in range(period + 1, n):
+        prev = (prev * (period - 1) + tr[i]) / period
+        out[i] = prev
+    return out
+
+
+def find_raw_swings(c, lookback=SR_SWING_LOOKBACK):
+    n = len(c)
+    raw_high = [None] * n
+    raw_low = [None] * n
+    for i in range(lookback, n - lookback):
+        if c[i][2] == max(c[j][2] for j in range(i - lookback, i + lookback + 1)):
+            raw_high[i] = c[i][2]
+        if c[i][3] == min(c[j][3] for j in range(i - lookback, i + lookback + 1)):
+            raw_low[i] = c[i][3]
+    return raw_high, raw_low
+
+
+def sr_levels(raw_high, raw_low, closes, i):
+    """ক্যান্ডেল i-তে জানা কনফার্মড এবং অভাঙা লেভেল।
+    ভাঙা = সুইং তৈরির পর কোনো ক্যান্ডেল টলারেন্সসহ লেভেলের ওপারে ক্লোজ করেছে।"""
+    tol = SR_TOUCH_TOL_PCT / 100
+    start = max(0, i - SR_LOOKBACK_CANDLES)
+    end = i - SR_SWING_LOOKBACK
+    res, sup = [], []
+    for k in range(start, end + 1):
+        after = closes[k + 1:i]
+        lv = raw_high[k]
+        if lv is not None and not (after and max(after) > lv * (1 + tol)):
+            res.append(lv)
+        lv = raw_low[k]
+        if lv is not None and not (after and min(after) < lv * (1 - tol)):
+            sup.append(lv)
+    return res, sup
+
+
+def touches_support(candle, sup):
+    _, _, _, lo, cl = candle
+    tol = SR_TOUCH_TOL_PCT / 100
+    return any(lo <= s * (1 + tol) and cl > s * (1 - tol) and lo >= s * (1 - 3 * tol) for s in sup)
+
+
+def touches_resistance(candle, res):
+    _, _, hi, _, cl = candle
+    tol = SR_TOUCH_TOL_PCT / 100
+    return any(hi >= r * (1 - tol) and cl < r * (1 + tol) and hi <= r * (1 + 3 * tol) for r in res)
+
+
+def ema_angle(ema, atr, i):
+    """EMA-র ঢাল ডিগ্রিতে। ঢাল ATR-এককে মাপা, তাই স্কেল সব সময় একই। উঠলে +, নামলে −।"""
     if i < ANGLE_LOOKBACK or ema[i] is None or ema[i - ANGLE_LOOKBACK] is None:
         return None
-    win = c[max(0, i - CHART_WINDOW + 1): i + 1]
-    rng = max(x[2] for x in win) - min(x[3] for x in win)
-    if rng <= 0:
+    if atr[i] is None or atr[i] <= 0:
         return None
-    tan_a = (ema[i] - ema[i - ANGLE_LOOKBACK]) / rng * (CHART_WINDOW / ANGLE_LOOKBACK) / CHART_ASPECT
-    return math.degrees(math.atan(tan_a))
+    slope = (ema[i] - ema[i - ANGLE_LOOKBACK]) / ANGLE_LOOKBACK / atr[i]
+    return math.degrees(math.atan(slope * ANGLE_SCALE))
 
 
 def candle_patterns(c):
-    """একটা ক্যান্ডেল থেকে প্যাটার্ন লিস্ট রিটার্ন করে: [(নাম, দিক), ...]
-    দিক: 'bull' মানে বাই-সাপোর্ট, 'bear' মানে সেল-সাপোর্ট।"""
-    _, o, h, l, cl = c
-    rng = h - l
+    """[(নাম, দিক), ...]। 'bull' = BUY-সমর্থক, 'bear' = SELL-সমর্থক।"""
+    _, o, h, low, cl = c
+    rng = h - low
     if rng <= 0:
         return []
     body = abs(cl - o)
     upper = h - max(o, cl)
-    lower = min(o, cl) - l
+    lower = min(o, cl) - low
     found = []
 
-    # Marubozu: বডি প্রায় পুরো ক্যান্ডেল
     if body / rng >= MARUBOZU_BODY_RATIO:
         found.append(("Marubozu", "bull" if cl > o else "bear"))
 
-    # Hammer / Hanging Man: একই আকৃতি (ছোট বডি উপরে, লম্বা নিচের উইক)
-    if body / rng >= MIN_BODY_RATIO and lower >= HAMMER_LOWER_WICK_X * body \
-            and upper <= HAMMER_UPPER_WICK_MAX * body:
-        # বুলিশ ক্রসের পর Hammer → বাই; বেয়ারিশ ক্রসের পর Hanging Man → সেল
-        found.append(("Hammer", "bull"))
-        found.append(("HangingMan", "bear"))
+    if body / rng >= MIN_BODY_RATIO:
+        # লম্বা নিচের উইক: নিচে প্রত্যাখ্যান → Hammer (BUY)
+        if lower >= WICK_LONG_X * body and upper <= WICK_SHORT_MAX * body:
+            found.append(("Hammer", "bull"))
+            if BEAR_WICK_PATTERN == "HangingMan":
+                found.append(("HangingMan", "bear"))
+        # লম্বা ওপরের উইক: ওপরে প্রত্যাখ্যান → Shooting Star (SELL)
+        if BEAR_WICK_PATTERN == "ShootingStar" and \
+                upper >= WICK_LONG_X * body and lower <= WICK_SHORT_MAX * body:
+            found.append(("ShootingStar", "bear"))
     return found
 
 
 def simulate(c, entry_idx, direction, entry, sl, tp):
-    """entry_idx ক্যান্ডেলের ওপেনে এন্ট্রি, ওই ক্যান্ডেল থেকেই চেক শুরু।"""
-    end = min(entry_idx + MAX_HOLD_CANDLES, len(c) - 1)
+    end = len(c) - 1 if MAX_HOLD_CANDLES is None else min(entry_idx + MAX_HOLD_CANDLES, len(c) - 1)
     for j in range(entry_idx, end + 1):
-        _, o, h, l, cl = c[j]
+        _, o, h, low, cl = c[j]
         if direction == "bull":
-            if l <= sl:
-                return "SL", min(sl, o) if j == entry_idx else sl, j - entry_idx
+            if low <= sl:
+                return "SL", min(sl, o), j - entry_idx   # গ্যাপ হলে ওপেনে
             if h >= tp:
                 return "TP", tp, j - entry_idx
         else:
             if h >= sl:
-                return "SL", max(sl, o) if j == entry_idx else sl, j - entry_idx
-            if l <= tp:
+                return "SL", max(sl, o), j - entry_idx
+            if low <= tp:
                 return "TP", tp, j - entry_idx
+    if MAX_HOLD_CANDLES is None:
+        return "OPEN", c[end][4], end - entry_idx
     return "TIMEOUT", c[end][4], end - entry_idx
 
 
@@ -176,13 +255,22 @@ def report(title, trades):
     if not trades:
         print(f"{title}: 0টা ট্রেড")
         return
-    wins = [t for t in trades if t["ret"] > 0]
-    gross_win = sum(t["ret"] for t in trades if t["ret"] > 0)
-    gross_loss = -sum(t["ret"] for t in trades if t["ret"] < 0)
-    pf = gross_win / gross_loss if gross_loss > 0 else float("inf")
+    wins = [t for t in trades if t["r"] > 0]
+    gw = sum(t["r"] for t in trades if t["r"] > 0)
+    gl = -sum(t["r"] for t in trades if t["r"] < 0)
+    pf = gw / gl if gl > 0 else float("inf")
     print(f"{title}: {len(trades)}টা | win {len(wins)} ({len(wins)/len(trades)*100:.0f}%) | "
-          f"মোট {sum(t['ret'] for t in trades):+.2f}% | গড় {sum(t['ret'] for t in trades)/len(trades):+.3f}% | "
-          f"গড় R {sum(t['r'] for t in trades)/len(trades):+.2f} | PF {pf:.2f}")
+          f"মোট {sum(t['r'] for t in trades):+.1f}R | গড় {sum(t['r'] for t in trades)/len(trades):+.3f}R | "
+          f"PF {pf:.2f} | মোট (১ ইউনিট পুঁজি) {sum(t['ret'] for t in trades):+.1f}%")
+
+
+def max_drawdown_r(trades):
+    equity = peak = dd = 0.0
+    for t in trades:
+        equity += t["r"]
+        peak = max(peak, equity)
+        dd = max(dd, peak - equity)
+    return dd
 
 
 def main():
@@ -193,18 +281,20 @@ def main():
     closes = [x[4] for x in c]
     ef = ema_series(closes, EMA_FAST)
     es = ema_series(closes, EMA_SLOW)
+    atr = atr_series(c)
+    raw_high, raw_low = find_raw_swings(c, SR_SWING_LOOKBACK)
+    warmup = max(EMA_SLOW, ATR_PERIOD) + 5
 
     trades = []
     last_cross_idx = None
     last_cross_dir = None
     used_cross = None
     next_free = 0
-    angles_seen = []      # প্যাটার্ন মিলেছে এমন সব সিগন্যালের অ্যাঙ্গেল (দিক অনুযায়ী ধনাত্মক)
+    angles_seen = []
     skipped_angle = 0
-    warmup = EMA_SLOW + 5
+    skipped_sr = 0
 
     for i in range(warmup, len(c) - 1):
-        # ক্রস ডিটেকশন
         if ef[i] is not None and es[i] is not None and ef[i - 1] is not None and es[i - 1] is not None:
             if ef[i - 1] <= es[i - 1] and ef[i] > es[i]:
                 last_cross_idx, last_cross_dir = i, "bull"
@@ -218,13 +308,11 @@ def main():
         if ONE_TRADE_PER_CROSS and used_cross == last_cross_idx:
             continue
 
-        # সিগন্যাল ক্যান্ডেল: ক্রসের দিকের সাথে মেলে এমন প্যাটার্ন
         pats = [name for name, d in candle_patterns(c[i]) if d == last_cross_dir]
         if not pats:
             continue
 
-        # অ্যাঙ্গেল ফিল্টার: বুলিশে +৬০..+৭৫°, বেয়ারিশে −৬০..−৭৫°
-        ang = ema_angle(c, ef, i)
+        ang = ema_angle(ef, atr, i)
         if ang is not None:
             angles_seen.append(ang if last_cross_dir == "bull" else -ang)
         if USE_ANGLE_FILTER:
@@ -236,8 +324,17 @@ def main():
                 continue
 
         direction = last_cross_dir
+
+        res_levels, sup_levels = sr_levels(raw_high, raw_low, closes, i)
+        if USE_SR_FILTER:
+            ok = touches_support(c[i], sup_levels) if direction == "bull" \
+                else touches_resistance(c[i], res_levels)
+            if not ok:
+                skipped_sr += 1
+                continue
+
         entry_idx = i + 1
-        entry = c[entry_idx][1]  # পরের ক্যান্ডেলের ওপেন
+        entry = c[entry_idx][1]
         _, _, hi, lo, _ = c[i]
         if direction == "bull":
             sl = lo
@@ -250,12 +347,26 @@ def main():
         if risk <= 0 or risk / entry * 100 < MIN_RISK_PCT:
             continue
 
+        if USE_SR_FILTER and SR_BLOCK_TP:
+            if direction == "bull" and any(entry < lv < tp for lv in res_levels):
+                skipped_sr += 1
+                continue
+            if direction == "bear" and any(tp < lv < entry for lv in sup_levels):
+                skipped_sr += 1
+                continue
+
         outcome, exit_price, bars = simulate(c, entry_idx, direction, entry, sl, tp)
+        if outcome == "OPEN":
+            print(f"\nℹ শেষ ট্রেড ({c[entry_idx][0]:%Y-%m-%d %H:%M}, {direction}) ডেটার শেষেও SL/TP লাগেনি, হিসাবের বাইরে")
+            break
+
         raw = (exit_price - entry) / entry * 100
         ret = (raw if direction == "bull" else -raw) - ROUND_TRIP_COST_PCT
-        r_mult = ((exit_price - entry) if direction == "bull" else (entry - exit_price)) / risk
+        risk_pct = risk / entry * 100
+        gross_r = ((exit_price - entry) if direction == "bull" else (entry - exit_price)) / risk
+        r_mult = gross_r - ROUND_TRIP_COST_PCT / risk_pct   # খরচসহ নিট R
 
-        trades.append({"time": c[entry_idx][0], "direction": direction, "pattern": pats[0],
+        trades.append({"time": c[entry_idx][0], "direction": direction, "pattern": "+".join(pats),
                        "entry": entry, "sl": sl, "tp": tp, "outcome": outcome,
                        "ret": ret, "r": r_mult, "bars": bars})
         used_cross = last_cross_idx
@@ -267,29 +378,32 @@ def main():
         print(f"{t['time']:%Y-%m-%d %H:%M} {arrow} [{t['pattern']}] @ {t['entry']:,.2f} "
               f"SL {t['sl']:,.2f} TP {t['tp']:,.2f} → {t['outcome']} {t['ret']:+.2f}% ({t['r']:+.2f}R)")
 
-    print(f"\n{'=' * 60}\nসারসংক্ষেপ")
+    print(f"\n{'=' * 60}\nসারসংক্ষেপ (R = খরচ-পরবর্তী নিট)")
     if angles_seen:
         s = sorted(angles_seen)
         pick = lambda p: s[min(len(s) - 1, int(len(s) * p))]  # noqa: E731
-        print(f"অ্যাঙ্গেল ডায়াগনস্টিক ({len(s)}টা প্যাটার্ন-সিগন্যাল, দিক অনুযায়ী): "
+        print(f"অ্যাঙ্গেল ডায়াগনস্টিক ({len(s)}টা প্যাটার্ন-সিগন্যাল): "
               f"মিন {s[0]:.0f}° | ২৫% {pick(0.25):.0f}° | মিডিয়ান {pick(0.5):.0f}° | "
               f"৭৫% {pick(0.75):.0f}° | ৯০% {pick(0.9):.0f}° | ম্যাক্স {s[-1]:.0f}°")
         in_range = sum(1 for a in s if ANGLE_MIN <= a <= ANGLE_MAX)
-        print(f"  {ANGLE_MIN}–{ANGLE_MAX}° রেঞ্জে পড়েছে {in_range}টা | অ্যাঙ্গেলের কারণে বাদ {skipped_angle}টা")
+        print(f"  {ANGLE_MIN}–{ANGLE_MAX}° রেঞ্জে {in_range}টা | অ্যাঙ্গেলের কারণে বাদ {skipped_angle}টা | SR-এর কারণে বাদ {skipped_sr}টা")
         if in_range < 30:
-            print("  ⚠ সিগন্যাল খুব কম — CHART_WINDOW/ANGLE_LOOKBACK/CHART_ASPECT বদলে ডিগ্রির স্কেল মিলিয়ে নিন")
+            print("  ⚠ সিগন্যাল কম — ANGLE_SCALE/ANGLE_LOOKBACK বদলে স্কেল মিলিয়ে নিন")
+
     report("মোট", trades)
-    for p in ("Marubozu", "Hammer", "HangingMan"):
-        report(f"  {p}", [t for t in trades if t["pattern"] == p])
+    for p in ("Marubozu", "Hammer", "ShootingStar", "HangingMan"):
+        sub = [t for t in trades if p in t["pattern"].split("+")]
+        if sub:
+            report(f"  {p}", sub)
     report("  শুধু BUY", [t for t in trades if t["direction"] == "bull"])
     report("  শুধু SELL", [t for t in trades if t["direction"] == "bear"])
 
-    equity = peak = max_dd = 0.0
-    for t in trades:
-        equity += t["ret"]
-        peak = max(peak, equity)
-        max_dd = max(max_dd, peak - equity)
-    print(f"\nসর্বোচ্চ ড্রডাউন: -{max_dd:.2f}% | ব্রেকইভেন win rate (1:{RR:g}): {100/(1+RR):.0f}%")
+    split_time = c[int(len(c) * IS_FRACTION)][0]
+    print(f"\nইন-স্যাম্পল / আউট-অব-স্যাম্পল (ভাগ: {split_time:%Y-%m-%d})")
+    report("  ইন-স্যাম্পল", [t for t in trades if t["time"] < split_time])
+    report("  আউট-অব-স্যাম্পল", [t for t in trades if t["time"] >= split_time])
+
+    print(f"\nসর্বোচ্চ ড্রডাউন: -{max_drawdown_r(trades):.1f}R | ব্রেকইভেন win rate (1:{RR:g}, খরচ ছাড়া): {100/(1+RR):.0f}%")
 
 
 if __name__ == "__main__":
