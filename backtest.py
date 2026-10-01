@@ -7,13 +7,8 @@ import datetime as dt
 from pathlib import Path
 
 # ============================================================
-# EMA 9/15 + PINBAR BACKTEST V2
-# Matched with Original Signal Bot
-#
-# FIX 1: Exact SMA-seeded EMA calculation
-# FIX 2: Entry at next candle OPEN
-# FIX 3: Recalculate SL, TP and risk after entry
-# FIX 4: Correct Maximum Drawdown calculation
+# EMA 9/15 + PINBAR BACKTEST V3
+# Trend Strength + Market Structure + RR Comparison
 # ============================================================
 
 API_KEY = os.environ.get("TWELVE_DATA_API_KEY")
@@ -37,20 +32,69 @@ PINBAR_NOSE_MAX_RATIO = 0.40
 CLOSE_POSITION_LIMIT = 0.30
 
 SL_BUFFER_ATR = 0.10
-RISK_REWARD = 2.0
-
 TOUCH_ATR = 0.15
+
 MIN_SL_ATR = 1.0
 MAX_SL_ATR = 2.5
 
-OUTPUT = Path("backtest_results_v2")
+# New trend strength filters
+MIN_EMA_SEPARATION_ATR = 0.10
+MIN_EMA_SLOPE_ATR = 0.05
+
+# Market structure windows
+STRUCTURE_LOOKBACK = 5
+
+# Test configurations
+TESTS = [
+    {
+        "name": "BASELINE_RR1.5",
+        "trend_filter": False,
+        "structure_filter": False,
+        "rr": 1.5,
+    },
+    {
+        "name": "BASELINE_RR2.0",
+        "trend_filter": False,
+        "structure_filter": False,
+        "rr": 2.0,
+    },
+    {
+        "name": "TREND_FILTER_RR1.5",
+        "trend_filter": True,
+        "structure_filter": False,
+        "rr": 1.5,
+    },
+    {
+        "name": "TREND_FILTER_RR2.0",
+        "trend_filter": True,
+        "structure_filter": False,
+        "rr": 2.0,
+    },
+    {
+        "name": "STRUCTURE_RR1.5",
+        "trend_filter": False,
+        "structure_filter": True,
+        "rr": 1.5,
+    },
+    {
+        "name": "COMBINED_RR1.5",
+        "trend_filter": True,
+        "structure_filter": True,
+        "rr": 1.5,
+    },
+    {
+        "name": "COMBINED_RR2.0",
+        "trend_filter": True,
+        "structure_filter": True,
+        "rr": 2.0,
+    },
+]
+
+OUTPUT = Path("backtest_results_v3")
 OUTPUT.mkdir(exist_ok=True)
 
 UTC = dt.timezone.utc
 SESSION = requests.Session()
-SESSION.headers.update({
-    "User-Agent": "EMA-Pinbar-Backtest/2.0"
-})
 
 
 # ============================================================
@@ -60,9 +104,7 @@ SESSION.headers.update({
 def download_data(symbol, days):
 
     if not API_KEY:
-        raise RuntimeError(
-            "TWELVE_DATA_API_KEY environment variable missing"
-        )
+        raise RuntimeError("Missing TWELVE_DATA_API_KEY")
 
     end = dt.datetime.now(UTC).replace(
         second=0,
@@ -102,7 +144,7 @@ def download_data(symbol, days):
 
         if "values" not in data:
             raise RuntimeError(
-                f"API error for {symbol}: {data}"
+                f"API error: {data}"
             )
 
         all_rows.extend(data["values"])
@@ -118,9 +160,7 @@ def download_data(symbol, days):
     df = pd.DataFrame(all_rows)
 
     if df.empty:
-        raise RuntimeError(
-            f"No data received for {symbol}"
-        )
+        raise RuntimeError("No historical data received")
 
     df["dt"] = pd.to_datetime(
         df["datetime"],
@@ -141,24 +181,20 @@ def download_data(symbol, days):
         subset=["dt"]
     )
 
-    df = df.sort_values(
-        "dt"
-    ).reset_index(drop=True)
+    df = df.sort_values("dt").reset_index(drop=True)
 
-    # Remove incomplete candles
     now = pd.Timestamp.now(tz="UTC")
 
     df = df[
-        df["dt"] + pd.Timedelta(
-            minutes=INTERVAL_MINUTES
-        ) <= now
+        df["dt"] + pd.Timedelta(minutes=INTERVAL_MINUTES)
+        <= now
     ].reset_index(drop=True)
 
     return df
 
 
 # ============================================================
-# EXACT EMA CALCULATION FROM ORIGINAL BOT
+# INDICATORS - MATCH LIVE SCANNER CALCULATION
 # ============================================================
 
 def ema_series(values, period):
@@ -170,7 +206,6 @@ def ema_series(values, period):
 
     k = 2 / (period + 1)
 
-    # SMA seed — same as original signal bot
     result[period - 1] = sum(
         values[:period]
     ) / period
@@ -185,57 +220,46 @@ def ema_series(values, period):
     return result
 
 
-# ============================================================
-# EXACT WILDER ATR FROM ORIGINAL BOT
-# ============================================================
-
 def atr_series(df, period):
 
-    if df.empty:
-        return []
+    highs = df["high"].tolist()
+    lows = df["low"].tolist()
+    closes = df["close"].tolist()
 
-    candles = df.to_dict("records")
+    tr = []
 
-    true_ranges = []
-
-    for i, candle in enumerate(candles):
+    for i in range(len(df)):
 
         if i == 0:
-            tr = candle["high"] - candle["low"]
+            value = highs[i] - lows[i]
 
         else:
-            previous_close = candles[i - 1]["close"]
-
-            tr = max(
-                candle["high"] - candle["low"],
-                abs(candle["high"] - previous_close),
-                abs(candle["low"] - previous_close)
+            value = max(
+                highs[i] - lows[i],
+                abs(highs[i] - closes[i - 1]),
+                abs(lows[i] - closes[i - 1])
             )
 
-        true_ranges.append(tr)
+        tr.append(value)
 
-    result = [None] * len(candles)
+    result = [None] * len(df)
 
-    if len(candles) < period:
+    if len(df) < period:
         return result
 
     result[period - 1] = sum(
-        true_ranges[:period]
+        tr[:period]
     ) / period
 
-    for i in range(period, len(candles)):
+    for i in range(period, len(df)):
 
         result[i] = (
             result[i - 1] * (period - 1)
-            + true_ranges[i]
+            + tr[i]
         ) / period
 
     return result
 
-
-# ============================================================
-# ADD INDICATORS
-# ============================================================
 
 def add_indicators(df):
 
@@ -262,7 +286,7 @@ def add_indicators(df):
 
 
 # ============================================================
-# PINBAR DETECTION — SAME AS ORIGINAL BOT
+# PINBAR DETECTION
 # ============================================================
 
 def classify_pinbar(row):
@@ -284,25 +308,21 @@ def classify_pinbar(row):
         candle_range * 0.01
     )
 
-    upper_wick = h - max(o, c)
-    lower_wick = min(o, c) - l
+    upper = h - max(o, c)
+    lower = min(o, c) - l
 
-    close_position = (
-        c - l
-    ) / candle_range
+    close_position = (c - l) / candle_range
 
-    # Bullish rejection
     if (
-        lower_wick >= PINBAR_WICK_RATIO * body_for_ratio
-        and upper_wick <= PINBAR_NOSE_MAX_RATIO * lower_wick
+        lower >= PINBAR_WICK_RATIO * body_for_ratio
+        and upper <= PINBAR_NOSE_MAX_RATIO * lower
         and close_position >= 1 - CLOSE_POSITION_LIMIT
     ):
         return "BUY"
 
-    # Bearish rejection
     if (
-        upper_wick >= PINBAR_WICK_RATIO * body_for_ratio
-        and lower_wick <= PINBAR_NOSE_MAX_RATIO * upper_wick
+        upper >= PINBAR_WICK_RATIO * body_for_ratio
+        and lower <= PINBAR_NOSE_MAX_RATIO * upper
         and close_position <= CLOSE_POSITION_LIMIT
     ):
         return "SELL"
@@ -311,24 +331,62 @@ def classify_pinbar(row):
 
 
 # ============================================================
-# SIGNAL DETECTION
+# MARKET STRUCTURE FILTER
 # ============================================================
 
-def get_signal(df, i):
+def structure_confirmation(df, i, side):
+
+    n = STRUCTURE_LOOKBACK
+
+    if i < 2 * n:
+        return False
+
+    # Both windows exclude the current signal candle.
+    previous = df.iloc[i - 2*n:i - n]
+    recent = df.iloc[i - n:i]
+
+    previous_high = previous["high"].max()
+    previous_low = previous["low"].min()
+
+    recent_high = recent["high"].max()
+    recent_low = recent["low"].min()
+
+    if side == "BUY":
+
+        return (
+            recent_high > previous_high
+            and recent_low > previous_low
+        )
+
+    if side == "SELL":
+
+        return (
+            recent_high < previous_high
+            and recent_low < previous_low
+        )
+
+    return False
+
+
+# ============================================================
+# SIGNAL ENGINE
+# ============================================================
+
+def get_signal(df, i, config):
 
     row = df.iloc[i]
     prev = df.iloc[i - 1]
     slope = df.iloc[i - EMA_SLOPE_LOOKBACK]
 
-    if pd.isna(row["atr"]) or row["atr"] <= 0:
+    atr = row["atr"]
+
+    if pd.isna(atr) or atr <= 0:
         return None
 
     pinbar = classify_pinbar(row)
 
     if pinbar is None:
         return None
-
-    atr = row["atr"]
 
     # EMA15 touch
     ema_touch = (
@@ -339,7 +397,6 @@ def get_signal(df, i):
     if not ema_touch:
         return None
 
-    # Trend filters — same as original bot
     trend_up = (
         row["ema9"] > row["ema15"]
         and row["ema15"] > slope["ema15"]
@@ -352,7 +409,41 @@ def get_signal(df, i):
         and row["ema9"] < slope["ema9"]
     )
 
-    signal_close = row["close"]
+    # New trend strength filter
+    ema_separation = abs(
+        row["ema9"] - row["ema15"]
+    ) / atr
+
+    ema_slope = (
+        row["ema15"] - slope["ema15"]
+    ) / atr
+
+    if config["trend_filter"]:
+
+        if ema_separation < MIN_EMA_SEPARATION_ATR:
+            return None
+
+        if pinbar == "BUY":
+
+            if ema_slope < MIN_EMA_SLOPE_ATR:
+                return None
+
+        elif pinbar == "SELL":
+
+            if ema_slope > -MIN_EMA_SLOPE_ATR:
+                return None
+
+    # New market structure filter
+    if config["structure_filter"]:
+
+        if not structure_confirmation(
+            df,
+            i,
+            pinbar
+        ):
+            return None
+
+    entry = row["close"]
     buffer = SL_BUFFER_ATR * atr
 
     if pinbar == "BUY" and trend_up:
@@ -361,16 +452,7 @@ def get_signal(df, i):
             return None
 
         sl = row["low"] - buffer
-
-        original_risk = signal_close - sl
-
-        if original_risk <= 0:
-            return None
-
-        original_risk_atr = original_risk / atr
-
-        if not MIN_SL_ATR <= original_risk_atr <= MAX_SL_ATR:
-            return None
+        risk = entry - sl
 
     elif pinbar == "SELL" and trend_down:
 
@@ -378,70 +460,38 @@ def get_signal(df, i):
             return None
 
         sl = row["high"] + buffer
-
-        original_risk = sl - signal_close
-
-        if original_risk <= 0:
-            return None
-
-        original_risk_atr = original_risk / atr
-
-        if not MIN_SL_ATR <= original_risk_atr <= MAX_SL_ATR:
-            return None
+        risk = sl - entry
 
     else:
         return None
-
-    return {
-        "side": pinbar,
-        "signal_close": signal_close,
-        "sl": sl,
-        "atr": atr,
-        "signal_time": row["dt"],
-        "ema9": row["ema9"],
-        "ema15": row["ema15"],
-        "original_risk_atr": original_risk_atr,
-    }
-
-
-# ============================================================
-# EXECUTION — NEXT CANDLE OPEN
-# ============================================================
-
-def prepare_trade(signal, entry):
-
-    side = signal["side"]
-    sl = signal["sl"]
-    atr = signal["atr"]
-
-    if side == "BUY":
-        risk = entry - sl
-
-    else:
-        risk = sl - entry
 
     if risk <= 0:
         return None
 
     risk_atr = risk / atr
 
-    # Reject trades where execution price makes risk invalid
     if not MIN_SL_ATR <= risk_atr <= MAX_SL_ATR:
         return None
 
-    if side == "BUY":
-        tp = entry + RISK_REWARD * risk
+    rr = config["rr"]
 
+    if pinbar == "BUY":
+        tp = entry + rr * risk
     else:
-        tp = entry - RISK_REWARD * risk
+        tp = entry - rr * risk
 
     return {
-        "side": side,
+        "side": pinbar,
         "entry": entry,
         "sl": sl,
         "tp": tp,
         "risk": risk,
         "risk_atr": risk_atr,
+        "rr": rr,
+        "signal_time": row["dt"],
+        "ema9": row["ema9"],
+        "ema15": row["ema15"],
+        "atr": atr,
     }
 
 
@@ -449,11 +499,11 @@ def prepare_trade(signal, entry):
 # TRADE SIMULATION
 # ============================================================
 
-def simulate_trade(df, trade, start_index):
+def simulate_trade(df, signal, start_index):
 
-    side = trade["side"]
-    sl = trade["sl"]
-    tp = trade["tp"]
+    side = signal["side"]
+    sl = signal["sl"]
+    tp = signal["tp"]
 
     for j in range(start_index, len(df)):
 
@@ -469,8 +519,7 @@ def simulate_trade(df, trade, start_index):
             hit_sl = candle["high"] >= sl
             hit_tp = candle["low"] <= tp
 
-        # Conservative assumption:
-        # If SL and TP both hit in one candle, SL first.
+        # Conservative same-candle assumption
         if hit_sl:
 
             return {
@@ -487,7 +536,7 @@ def simulate_trade(df, trade, start_index):
                 "result": "WIN",
                 "exit": tp,
                 "exit_time": candle["dt"],
-                "R": RISK_REWARD,
+                "R": signal["rr"],
                 "exit_index": j,
             }
 
@@ -504,58 +553,47 @@ def simulate_trade(df, trade, start_index):
 # BACKTEST ENGINE
 # ============================================================
 
-def run_backtest(df, symbol):
+def run_backtest(df, symbol, config):
 
     trades = []
 
     warmup = max(
         ATR_PERIOD,
-        EMA_SLOW
+        EMA_SLOW,
+        STRUCTURE_LOOKBACK * 2
     ) + EMA_SLOPE_LOOKBACK + 2
 
     i = warmup
 
     while i < len(df) - 1:
 
-        signal = get_signal(df, i)
+        signal = get_signal(
+            df,
+            i,
+            config
+        )
 
         if signal is None:
             i += 1
             continue
 
-        # Entry occurs at NEXT candle OPEN
-        entry_index = i + 1
-        entry_candle = df.iloc[entry_index]
-
-        entry = entry_candle["open"]
-
-        trade_setup = prepare_trade(
-            signal,
-            entry
-        )
-
-        if trade_setup is None:
-            i += 1
-            continue
-
         outcome = simulate_trade(
             df,
-            trade_setup,
-            entry_index
+            signal,
+            i + 1
         )
 
         trade = {
             "symbol": symbol,
-            "side": trade_setup["side"],
+            "test": config["name"],
+            "side": signal["side"],
             "signal_time": signal["signal_time"],
-            "entry_time": entry_candle["dt"],
-            "signal_close": signal["signal_close"],
-            "entry": trade_setup["entry"],
-            "sl": trade_setup["sl"],
-            "tp": trade_setup["tp"],
-            "risk": trade_setup["risk"],
-            "risk_atr": trade_setup["risk_atr"],
-            "original_risk_atr": signal["original_risk_atr"],
+            "entry": signal["entry"],
+            "sl": signal["sl"],
+            "tp": signal["tp"],
+            "risk": signal["risk"],
+            "risk_atr": signal["risk_atr"],
+            "rr": signal["rr"],
             "ema9": signal["ema9"],
             "ema15": signal["ema15"],
             "atr": signal["atr"],
@@ -567,7 +605,10 @@ def run_backtest(df, symbol):
 
         trades.append(trade)
 
-        # One active trade at a time
+        # No overlapping trades within this test
+        if outcome["result"] == "OPEN":
+            break
+
         i = outcome["exit_index"] + 1
 
     return pd.DataFrame(trades)
@@ -577,19 +618,19 @@ def run_backtest(df, symbol):
 # PERFORMANCE REPORT
 # ============================================================
 
-def report(df, symbol):
+def report(trades, symbol, test_name):
 
-    if df.empty:
-        print(f"\n{symbol}: No trades found.")
-        return
+    if trades.empty:
+        print(f"{symbol} | {test_name}: No trades")
+        return None
 
-    closed = df[
-        df["result"].isin(["WIN", "LOSS"])
+    closed = trades[
+        trades["result"].isin(["WIN", "LOSS"])
     ].copy()
 
     if closed.empty:
-        print(f"\n{symbol}: No closed trades.")
-        return
+        print(f"{symbol} | {test_name}: No closed trades")
+        return None
 
     wins = (closed["result"] == "WIN").sum()
     losses = (closed["result"] == "LOSS").sum()
@@ -612,50 +653,60 @@ def report(df, symbol):
         else float("inf")
     )
 
-    # Correct equity curve:
-    # Start from 0R initial equity
-    equity = [
-        0.0
-    ] + closed["R"].cumsum().tolist()
+    net_result = closed["R"].sum()
 
-    equity = pd.Series(equity)
+    # Include initial equity = 0 in drawdown calculation
+    equity = [0.0]
 
-    running_peak = equity.cummax()
-    drawdown = running_peak - equity
+    for value in closed["R"]:
+        equity.append(equity[-1] + value)
 
-    max_dd = drawdown.max()
+    peak = equity[0]
+    max_dd = 0.0
 
-    consecutive_losses = 0
-    max_consecutive_losses = 0
+    for value in equity:
+
+        peak = max(peak, value)
+        max_dd = max(max_dd, peak - value)
+
+    consecutive = 0
+    max_consecutive = 0
 
     for result in closed["result"]:
 
         if result == "LOSS":
-
-            consecutive_losses += 1
-
-            max_consecutive_losses = max(
-                max_consecutive_losses,
-                consecutive_losses
+            consecutive += 1
+            max_consecutive = max(
+                max_consecutive,
+                consecutive
             )
-
         else:
-            consecutive_losses = 0
+            consecutive = 0
 
-    print("\n" + "=" * 50)
-    print(f"BACKTEST V2 REPORT — {symbol}")
-    print("=" * 50)
+    summary = {
+        "symbol": symbol,
+        "test": test_name,
+        "trades": total,
+        "wins": wins,
+        "losses": losses,
+        "win_rate": round(win_rate, 2),
+        "profit_factor": round(profit_factor, 3),
+        "net_R": round(net_result, 2),
+        "max_drawdown_R": round(max_dd, 2),
+        "max_consecutive_losses": max_consecutive,
+    }
 
-    print(f"Total Closed Trades : {total}")
-    print(f"Wins                : {wins}")
-    print(f"Losses              : {losses}")
-    print(f"Win Rate            : {win_rate:.2f}%")
-    print(f"Profit Factor       : {profit_factor:.2f}")
-    print(f"Net Result          : {closed['R'].sum():.2f} R")
-    print(f"Max Drawdown        : {max_dd:.2f} R")
-    print(f"Max Consecutive Loss: {max_consecutive_losses}")
+    print("\n" + "=" * 55)
+    print(f"BACKTEST V3 — {symbol} — {test_name}")
+    print("=" * 55)
 
-    print("=" * 50)
+    for key, value in summary.items():
+        if key not in ("symbol", "test"):
+            print(f"{key:28}: {value}")
+
+    print("=" * 55)
+
+    return summary
 
 
 # ============================================================
@@ -664,11 +715,12 @@ def report(df, symbol):
 
 def main():
 
+    all_summaries = []
     all_trades = []
 
     for name, td_symbol in SYMBOLS.items():
 
-        print(f"\nDownloading {name} data...")
+        print(f"\nDownloading {name}...")
 
         try:
             candles = download_data(
@@ -676,12 +728,10 @@ def main():
                 DAYS
             )
 
-            print(
-                f"Received {len(candles)} candles"
-            )
+            print(f"Received {len(candles)} candles")
 
-            if len(candles) < 100:
-                print("Not enough candles. Skipping.")
+            if len(candles) < 200:
+                print("Not enough candles")
                 continue
 
             candles = add_indicators(candles)
@@ -691,26 +741,47 @@ def main():
                 index=False
             )
 
-            trades = run_backtest(
-                candles,
-                name
-            )
+            for config in TESTS:
 
-            trades.to_csv(
-                OUTPUT / f"{name}_trades.csv",
-                index=False
-            )
+                trades = run_backtest(
+                    candles,
+                    name,
+                    config
+                )
 
-            report(
-                trades,
-                name
-            )
+                trades.to_csv(
+                    OUTPUT / f"{name}_{config['name']}.csv",
+                    index=False
+                )
 
-            if not trades.empty:
-                all_trades.append(trades)
+                summary = report(
+                    trades,
+                    name,
+                    config["name"]
+                )
+
+                if summary:
+                    all_summaries.append(summary)
+
+                if not trades.empty:
+                    all_trades.append(trades)
 
         except Exception as error:
             print(f"{name} ERROR: {error}")
+
+    if all_summaries:
+
+        summary_df = pd.DataFrame(all_summaries)
+
+        summary_df.to_csv(
+            OUTPUT / "V3_COMPARISON.csv",
+            index=False
+        )
+
+        print("\n========== FINAL COMPARISON ==========")
+        print(
+            summary_df.to_string(index=False)
+        )
 
     if all_trades:
 
@@ -724,14 +795,8 @@ def main():
             index=False
         )
 
-        print("\nAll trade records saved.")
-
-    else:
-        print("\nNo trades generated.")
-
-    print(
-        f"\nReports folder: {OUTPUT.resolve()}"
-    )
+    print("\nAll results saved.")
+    print(f"Reports folder: {OUTPUT.resolve()}")
 
 
 if __name__ == "__main__":
