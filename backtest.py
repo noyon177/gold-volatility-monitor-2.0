@@ -1,3 +1,4 @@
+
 import os
 import time
 import requests
@@ -5,9 +6,15 @@ import pandas as pd
 import datetime as dt
 from pathlib import Path
 
-# ==========================================
-# EMA 9/15 + PINBAR BACKTEST ENGINE
-# ==========================================
+# ============================================================
+# EMA 9/15 + PINBAR BACKTEST V2
+# Matched with Original Signal Bot
+#
+# FIX 1: Exact SMA-seeded EMA calculation
+# FIX 2: Entry at next candle OPEN
+# FIX 3: Recalculate SL, TP and risk after entry
+# FIX 4: Correct Maximum Drawdown calculation
+# ============================================================
 
 API_KEY = os.environ.get("TWELVE_DATA_API_KEY")
 
@@ -17,6 +24,7 @@ SYMBOLS = {
 }
 
 INTERVAL = "15min"
+INTERVAL_MINUTES = 15
 DAYS = 90
 
 EMA_FAST = 9
@@ -35,15 +43,19 @@ TOUCH_ATR = 0.15
 MIN_SL_ATR = 1.0
 MAX_SL_ATR = 2.5
 
-OUTPUT = Path("backtest_results")
+OUTPUT = Path("backtest_results_v2")
 OUTPUT.mkdir(exist_ok=True)
 
 UTC = dt.timezone.utc
 SESSION = requests.Session()
+SESSION.headers.update({
+    "User-Agent": "EMA-Pinbar-Backtest/2.0"
+})
 
-# ==========================================
+
+# ============================================================
 # DOWNLOAD HISTORICAL DATA
-# ==========================================
+# ============================================================
 
 def download_data(symbol, days):
 
@@ -53,7 +65,8 @@ def download_data(symbol, days):
         )
 
     end = dt.datetime.now(UTC).replace(
-        second=0, microsecond=0
+        second=0,
+        microsecond=0
     )
 
     start = end - dt.timedelta(days=days)
@@ -100,14 +113,14 @@ def download_data(symbol, days):
         )
 
         cursor = chunk_end
-
-        # Respect API rate limits
         time.sleep(1)
 
     df = pd.DataFrame(all_rows)
 
     if df.empty:
-        raise RuntimeError(f"No data received for {symbol}")
+        raise RuntimeError(
+            f"No data received for {symbol}"
+        )
 
     df["dt"] = pd.to_datetime(
         df["datetime"],
@@ -115,78 +128,142 @@ def download_data(symbol, days):
     )
 
     for col in ["open", "high", "low", "close"]:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
+        df[col] = pd.to_numeric(
+            df[col],
+            errors="coerce"
+        )
 
     df = df.dropna(
         subset=["dt", "open", "high", "low", "close"]
     )
 
-    df = df.drop_duplicates(subset=["dt"])
-    df = df.sort_values("dt").reset_index(drop=True)
+    df = df.drop_duplicates(
+        subset=["dt"]
+    )
+
+    df = df.sort_values(
+        "dt"
+    ).reset_index(drop=True)
 
     # Remove incomplete candles
     now = pd.Timestamp.now(tz="UTC")
 
     df = df[
-        df["dt"] + pd.Timedelta(minutes=15) <= now
+        df["dt"] + pd.Timedelta(
+            minutes=INTERVAL_MINUTES
+        ) <= now
     ].reset_index(drop=True)
 
     return df
 
 
-# ==========================================
-# INDICATORS
-# ==========================================
+# ============================================================
+# EXACT EMA CALCULATION FROM ORIGINAL BOT
+# ============================================================
+
+def ema_series(values, period):
+
+    result = [None] * len(values)
+
+    if len(values) < period:
+        return result
+
+    k = 2 / (period + 1)
+
+    # SMA seed — same as original signal bot
+    result[period - 1] = sum(
+        values[:period]
+    ) / period
+
+    for i in range(period, len(values)):
+
+        result[i] = (
+            values[i] * k
+            + result[i - 1] * (1 - k)
+        )
+
+    return result
+
+
+# ============================================================
+# EXACT WILDER ATR FROM ORIGINAL BOT
+# ============================================================
+
+def atr_series(df, period):
+
+    if df.empty:
+        return []
+
+    candles = df.to_dict("records")
+
+    true_ranges = []
+
+    for i, candle in enumerate(candles):
+
+        if i == 0:
+            tr = candle["high"] - candle["low"]
+
+        else:
+            previous_close = candles[i - 1]["close"]
+
+            tr = max(
+                candle["high"] - candle["low"],
+                abs(candle["high"] - previous_close),
+                abs(candle["low"] - previous_close)
+            )
+
+        true_ranges.append(tr)
+
+    result = [None] * len(candles)
+
+    if len(candles) < period:
+        return result
+
+    result[period - 1] = sum(
+        true_ranges[:period]
+    ) / period
+
+    for i in range(period, len(candles)):
+
+        result[i] = (
+            result[i - 1] * (period - 1)
+            + true_ranges[i]
+        ) / period
+
+    return result
+
+
+# ============================================================
+# ADD INDICATORS
+# ============================================================
 
 def add_indicators(df):
 
-    close = df["close"]
+    df = df.copy()
 
-    df["ema9"] = close.ewm(
-        span=EMA_FAST,
-        adjust=False,
-        min_periods=EMA_FAST
-    ).mean()
+    closes = df["close"].tolist()
 
-    df["ema15"] = close.ewm(
-        span=EMA_SLOW,
-        adjust=False,
-        min_periods=EMA_SLOW
-    ).mean()
+    df["ema9"] = ema_series(
+        closes,
+        EMA_FAST
+    )
 
-    previous_close = close.shift(1)
+    df["ema15"] = ema_series(
+        closes,
+        EMA_SLOW
+    )
 
-    tr = pd.concat([
-        df["high"] - df["low"],
-        (df["high"] - previous_close).abs(),
-        (df["low"] - previous_close).abs()
-    ], axis=1).max(axis=1)
-
-    # Wilder ATR
-    atr = [None] * len(df)
-
-    if len(df) >= ATR_PERIOD:
-
-        values = tr.tolist()
-
-        atr[ATR_PERIOD - 1] = sum(
-            values[:ATR_PERIOD]
-        ) / ATR_PERIOD
-
-        for i in range(ATR_PERIOD, len(df)):
-            atr[i] = (
-                atr[i - 1] * (ATR_PERIOD - 1)
-                + values[i]
-            ) / ATR_PERIOD
-
-    df["atr"] = atr
+    df["atr"] = atr_series(
+        df,
+        ATR_PERIOD
+    )
 
     return df
 
 
-# ==========================================
-# PINBAR DETECTION
-# ==========================================
+# ============================================================
+# PINBAR DETECTION — SAME AS ORIGINAL BOT
+# ============================================================
 
 def classify_pinbar(row):
 
@@ -201,23 +278,31 @@ def classify_pinbar(row):
         return None
 
     body = abs(c - o)
-    body_ratio = max(body, candle_range * 0.01)
 
-    upper = h - max(o, c)
-    lower = min(o, c) - l
+    body_for_ratio = max(
+        body,
+        candle_range * 0.01
+    )
 
-    close_position = (c - l) / candle_range
+    upper_wick = h - max(o, c)
+    lower_wick = min(o, c) - l
 
+    close_position = (
+        c - l
+    ) / candle_range
+
+    # Bullish rejection
     if (
-        lower >= PINBAR_WICK_RATIO * body_ratio
-        and upper <= PINBAR_NOSE_MAX_RATIO * lower
+        lower_wick >= PINBAR_WICK_RATIO * body_for_ratio
+        and upper_wick <= PINBAR_NOSE_MAX_RATIO * lower_wick
         and close_position >= 1 - CLOSE_POSITION_LIMIT
     ):
         return "BUY"
 
+    # Bearish rejection
     if (
-        upper >= PINBAR_WICK_RATIO * body_ratio
-        and lower <= PINBAR_NOSE_MAX_RATIO * upper
+        upper_wick >= PINBAR_WICK_RATIO * body_for_ratio
+        and lower_wick <= PINBAR_NOSE_MAX_RATIO * upper_wick
         and close_position <= CLOSE_POSITION_LIMIT
     ):
         return "SELL"
@@ -225,9 +310,9 @@ def classify_pinbar(row):
     return None
 
 
-# ==========================================
+# ============================================================
 # SIGNAL DETECTION
-# ==========================================
+# ============================================================
 
 def get_signal(df, i):
 
@@ -240,11 +325,12 @@ def get_signal(df, i):
 
     pinbar = classify_pinbar(row)
 
-    if not pinbar:
+    if pinbar is None:
         return None
 
     atr = row["atr"]
 
+    # EMA15 touch
     ema_touch = (
         row["low"] <= row["ema15"] + TOUCH_ATR * atr
         and row["high"] >= row["ema15"] - TOUCH_ATR * atr
@@ -253,6 +339,7 @@ def get_signal(df, i):
     if not ema_touch:
         return None
 
+    # Trend filters — same as original bot
     trend_up = (
         row["ema9"] > row["ema15"]
         and row["ema15"] > slope["ema15"]
@@ -265,7 +352,7 @@ def get_signal(df, i):
         and row["ema9"] < slope["ema9"]
     )
 
-    entry = row["close"]
+    signal_close = row["close"]
     buffer = SL_BUFFER_ATR * atr
 
     if pinbar == "BUY" and trend_up:
@@ -274,17 +361,16 @@ def get_signal(df, i):
             return None
 
         sl = row["low"] - buffer
-        risk = entry - sl
 
-        if risk <= 0:
+        original_risk = signal_close - sl
+
+        if original_risk <= 0:
             return None
 
-        risk_atr = risk / atr
+        original_risk_atr = original_risk / atr
 
-        if not MIN_SL_ATR <= risk_atr <= MAX_SL_ATR:
+        if not MIN_SL_ATR <= original_risk_atr <= MAX_SL_ATR:
             return None
-
-        tp = entry + RISK_REWARD * risk
 
     elif pinbar == "SELL" and trend_down:
 
@@ -292,46 +378,82 @@ def get_signal(df, i):
             return None
 
         sl = row["high"] + buffer
-        risk = sl - entry
 
-        if risk <= 0:
+        original_risk = sl - signal_close
+
+        if original_risk <= 0:
             return None
 
-        risk_atr = risk / atr
+        original_risk_atr = original_risk / atr
 
-        if not MIN_SL_ATR <= risk_atr <= MAX_SL_ATR:
+        if not MIN_SL_ATR <= original_risk_atr <= MAX_SL_ATR:
             return None
-
-        tp = entry - RISK_REWARD * risk
 
     else:
         return None
 
     return {
         "side": pinbar,
+        "signal_close": signal_close,
+        "sl": sl,
+        "atr": atr,
+        "signal_time": row["dt"],
+        "ema9": row["ema9"],
+        "ema15": row["ema15"],
+        "original_risk_atr": original_risk_atr,
+    }
+
+
+# ============================================================
+# EXECUTION — NEXT CANDLE OPEN
+# ============================================================
+
+def prepare_trade(signal, entry):
+
+    side = signal["side"]
+    sl = signal["sl"]
+    atr = signal["atr"]
+
+    if side == "BUY":
+        risk = entry - sl
+
+    else:
+        risk = sl - entry
+
+    if risk <= 0:
+        return None
+
+    risk_atr = risk / atr
+
+    # Reject trades where execution price makes risk invalid
+    if not MIN_SL_ATR <= risk_atr <= MAX_SL_ATR:
+        return None
+
+    if side == "BUY":
+        tp = entry + RISK_REWARD * risk
+
+    else:
+        tp = entry - RISK_REWARD * risk
+
+    return {
+        "side": side,
         "entry": entry,
         "sl": sl,
         "tp": tp,
         "risk": risk,
         "risk_atr": risk_atr,
-        "signal_time": row["dt"],
-        "ema9": row["ema9"],
-        "ema15": row["ema15"],
-        "atr": atr,
     }
 
 
-# ==========================================
+# ============================================================
 # TRADE SIMULATION
-# ==========================================
+# ============================================================
 
-def simulate_trade(df, signal, start_index):
+def simulate_trade(df, trade, start_index):
 
-    side = signal["side"]
-    entry = signal["entry"]
-    sl = signal["sl"]
-    tp = signal["tp"]
-    risk = signal["risk"]
+    side = trade["side"]
+    sl = trade["sl"]
+    tp = trade["tp"]
 
     for j in range(start_index, len(df)):
 
@@ -348,7 +470,7 @@ def simulate_trade(df, signal, start_index):
             hit_tp = candle["low"] <= tp
 
         # Conservative assumption:
-        # If both hit in same candle, count SL first.
+        # If SL and TP both hit in one candle, SL first.
         if hit_sl:
 
             return {
@@ -378,9 +500,9 @@ def simulate_trade(df, signal, start_index):
     }
 
 
-# ==========================================
+# ============================================================
 # BACKTEST ENGINE
-# ==========================================
+# ============================================================
 
 def run_backtest(df, symbol):
 
@@ -401,21 +523,39 @@ def run_backtest(df, symbol):
             i += 1
             continue
 
+        # Entry occurs at NEXT candle OPEN
+        entry_index = i + 1
+        entry_candle = df.iloc[entry_index]
+
+        entry = entry_candle["open"]
+
+        trade_setup = prepare_trade(
+            signal,
+            entry
+        )
+
+        if trade_setup is None:
+            i += 1
+            continue
+
         outcome = simulate_trade(
             df,
-            signal,
-            i + 1
+            trade_setup,
+            entry_index
         )
 
         trade = {
             "symbol": symbol,
-            "side": signal["side"],
+            "side": trade_setup["side"],
             "signal_time": signal["signal_time"],
-            "entry": signal["entry"],
-            "sl": signal["sl"],
-            "tp": signal["tp"],
-            "risk": signal["risk"],
-            "risk_atr": signal["risk_atr"],
+            "entry_time": entry_candle["dt"],
+            "signal_close": signal["signal_close"],
+            "entry": trade_setup["entry"],
+            "sl": trade_setup["sl"],
+            "tp": trade_setup["tp"],
+            "risk": trade_setup["risk"],
+            "risk_atr": trade_setup["risk_atr"],
+            "original_risk_atr": signal["original_risk_atr"],
             "ema9": signal["ema9"],
             "ema15": signal["ema15"],
             "atr": signal["atr"],
@@ -427,15 +567,15 @@ def run_backtest(df, symbol):
 
         trades.append(trade)
 
-        # Do not open another trade while this one is active.
+        # One active trade at a time
         i = outcome["exit_index"] + 1
 
     return pd.DataFrame(trades)
 
 
-# ==========================================
+# ============================================================
 # PERFORMANCE REPORT
-# ==========================================
+# ============================================================
 
 def report(df, symbol):
 
@@ -443,17 +583,20 @@ def report(df, symbol):
         print(f"\n{symbol}: No trades found.")
         return
 
-    closed = df[df["result"].isin(["WIN", "LOSS"])]
+    closed = df[
+        df["result"].isin(["WIN", "LOSS"])
+    ].copy()
+
+    if closed.empty:
+        print(f"\n{symbol}: No closed trades.")
+        return
 
     wins = (closed["result"] == "WIN").sum()
     losses = (closed["result"] == "LOSS").sum()
 
     total = len(closed)
 
-    win_rate = (
-        wins / total * 100
-        if total else 0
-    )
+    win_rate = wins / total * 100
 
     gross_profit = closed.loc[
         closed["R"] > 0, "R"
@@ -465,17 +608,22 @@ def report(df, symbol):
 
     profit_factor = (
         gross_profit / gross_loss
-        if gross_loss else float("inf")
+        if gross_loss > 0
+        else float("inf")
     )
 
-    equity = closed["R"].cumsum()
+    # Correct equity curve:
+    # Start from 0R initial equity
+    equity = [
+        0.0
+    ] + closed["R"].cumsum().tolist()
 
-    if len(equity):
-        running_peak = equity.cummax()
-        drawdown = running_peak - equity
-        max_dd = drawdown.max()
-    else:
-        max_dd = 0
+    equity = pd.Series(equity)
+
+    running_peak = equity.cummax()
+    drawdown = running_peak - equity
+
+    max_dd = drawdown.max()
 
     consecutive_losses = 0
     max_consecutive_losses = 0
@@ -483,17 +631,20 @@ def report(df, symbol):
     for result in closed["result"]:
 
         if result == "LOSS":
+
             consecutive_losses += 1
+
             max_consecutive_losses = max(
                 max_consecutive_losses,
                 consecutive_losses
             )
+
         else:
             consecutive_losses = 0
 
-    print("\n" + "=" * 45)
-    print(f"BACKTEST REPORT — {symbol}")
-    print("=" * 45)
+    print("\n" + "=" * 50)
+    print(f"BACKTEST V2 REPORT — {symbol}")
+    print("=" * 50)
 
     print(f"Total Closed Trades : {total}")
     print(f"Wins                : {wins}")
@@ -504,12 +655,12 @@ def report(df, symbol):
     print(f"Max Drawdown        : {max_dd:.2f} R")
     print(f"Max Consecutive Loss: {max_consecutive_losses}")
 
-    print("=" * 45)
+    print("=" * 50)
 
 
-# ==========================================
+# ============================================================
 # MAIN
-# ==========================================
+# ============================================================
 
 def main():
 
@@ -520,9 +671,14 @@ def main():
         print(f"\nDownloading {name} data...")
 
         try:
-            candles = download_data(td_symbol, DAYS)
+            candles = download_data(
+                td_symbol,
+                DAYS
+            )
 
-            print(f"Received {len(candles)} candles")
+            print(
+                f"Received {len(candles)} candles"
+            )
 
             if len(candles) < 100:
                 print("Not enough candles. Skipping.")
@@ -535,14 +691,20 @@ def main():
                 index=False
             )
 
-            trades = run_backtest(candles, name)
+            trades = run_backtest(
+                candles,
+                name
+            )
 
             trades.to_csv(
                 OUTPUT / f"{name}_trades.csv",
                 index=False
             )
 
-            report(trades, name)
+            report(
+                trades,
+                name
+            )
 
             if not trades.empty:
                 all_trades.append(trades)
@@ -567,7 +729,9 @@ def main():
     else:
         print("\nNo trades generated.")
 
-    print(f"\nReports folder: {OUTPUT.resolve()}")
+    print(
+        f"\nReports folder: {OUTPUT.resolve()}"
+    )
 
 
 if __name__ == "__main__":
