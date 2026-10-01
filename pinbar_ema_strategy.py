@@ -1,37 +1,26 @@
 """
-Pinbar + EMA(9/15) Trend Rejection Strategy — Signal Scanner
-==============================================================
+Pinbar + EMA(9/15) Trend Rejection Strategy — Signal Scanner (fixed)
+====================================================================
 
-Strategy rules (15-minute candles):
-  - Trend filter : EMA9 vs EMA15
-        Uptrend   -> EMA9 > EMA15
-        Downtrend -> EMA9 < EMA15
-  - Setup        : price touches/reacts off EMA15 and forms a pinbar
-        Bullish pinbar in an UPTREND   -> BUY signal
-        Bearish pinbar in a DOWNTREND  -> SELL signal
-  - Stop Loss    : just beyond the pinbar's wick
-        BUY  -> SL below the pinbar low
-        SELL -> SL above the pinbar high
-  - Take Profit  : Risk:Reward = 1:2 (TP distance = 2x SL distance)
-  - Volatility filter : SL distance must be >= 0.5x ATR(14), otherwise the
-    signal is skipped (protects against unrealistically tight stops)
-  - Heartbeat    : sends a "bot is alive" message with current prices every
-    HEARTBEAT_INTERVAL_MINUTES, even when there is no trade signal
+Fixes vs. the old version:
+  1. Only fully CLOSED candles are used (the still-forming candle is dropped).
+     Old bug: Twelve Data returns the live candle too, so signals were sent
+     mid-candle (Close == High) and the "pinbar" could change shape afterwards.
+  2. Timezone is forced to UTC and candle close time is calculated properly.
+  3. SL has an ATR-based buffer beyond the wick, and the minimum SL distance is
+     now 1.0 x ATR (was 0.5 x ATR) -> avoids noise-sized stops.
+  4. Trend filter is stricter: EMA15 slope must agree with the trade direction.
+  5. Pullback check: previous candle must have closed on the trend side of EMA15.
+  6. Stale-signal guard: if the cron run is late (> MAX_SIGNAL_DELAY_MIN after
+     candle close), the signal is skipped because the entry price is outdated.
 
-Data source : Twelve Data (unified endpoint for both XAU/USD and BTC/USD)
-Alert       : Telegram Bot
-
-Required environment variables / GitHub Actions secrets:
-  TWELVE_DATA_API_KEY
-  TELEGRAM_BOT_TOKEN
-  TELEGRAM_CHAT_ID
-
-Run this on a schedule (e.g. every 15 minutes) via GitHub Actions cron.
+Required env vars / GitHub secrets:
+  TWELVE_DATA_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 """
 
 import os
 import json
-import datetime
+import datetime as dt
 import requests
 
 # ---------------------------------------------------------------------------
@@ -44,23 +33,33 @@ SYMBOLS = [
 ]
 
 INTERVAL = "15min"
+INTERVAL_MINUTES = 15
 EMA_FAST = 9
 EMA_SLOW = 15
 ATR_PERIOD = 14
-CANDLES_NEEDED = 60          # enough history for stable EMA15 / ATR14
-PINBAR_WICK_RATIO = 2.0      # dominant wick must be >= 2x the body
-PINBAR_NOSE_MAX_RATIO = 0.4  # opposite wick must be small vs the body
-EMA_TOUCH_TOLERANCE_PCT = 0.15  # how close (%) price must get to EMA15 to count as a "touch"
+CANDLES_NEEDED = 100
+PINBAR_WICK_RATIO = 2.0
+PINBAR_NOSE_MAX_RATIO = 0.4
+EMA_TOUCH_TOLERANCE_PCT = 0.15
 RISK_REWARD = 2.0
-MIN_SL_ATR_MULTIPLIER = 0.5  # SL distance must be >= 0.5x ATR14, else signal is skipped (too tight/noisy)
 
-HEARTBEAT_INTERVAL_MINUTES = 60  # send an "I'm alive" message this often
+SL_BUFFER_ATR = 0.1          # SL goes this much (x ATR) beyond the wick
+MIN_SL_ATR_MULTIPLIER = 1.0  # SL distance must be >= 1.0 x ATR, else skip
+EMA_SLOPE_LOOKBACK = 3       # EMA15 must be rising (buy) / falling (sell) over N candles
+MAX_SIGNAL_DELAY_MIN = 10    # skip if the candle closed more than this many minutes ago
 
-STATE_FILE = "last_signal_state.json"  # remembers last alerted candle per symbol, and last heartbeat time
+HEARTBEAT_INTERVAL_MINUTES = 60
+STATE_FILE = "last_signal_state.json"
 
 TWELVE_DATA_API_KEY = os.environ.get("TWELVE_DATA_API_KEY")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+
+UTC = dt.timezone.utc
+
+
+def now_utc():
+    return dt.datetime.now(UTC)
 
 
 # ---------------------------------------------------------------------------
@@ -68,24 +67,28 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 # ---------------------------------------------------------------------------
 
 def get_candles(td_symbol: str):
-    """Fetch OHLC candles from Twelve Data, oldest -> newest."""
-    url = "https://api.twelvedata.com/time_series"
-    params = {
-        "symbol": td_symbol,
-        "interval": INTERVAL,
-        "outputsize": CANDLES_NEEDED,
-        "apikey": TWELVE_DATA_API_KEY,
-    }
-    resp = requests.get(url, params=params, timeout=20)
+    """Fetch candles from Twelve Data, oldest -> newest (UTC times)."""
+    resp = requests.get(
+        "https://api.twelvedata.com/time_series",
+        params={
+            "symbol": td_symbol,
+            "interval": INTERVAL,
+            "outputsize": CANDLES_NEEDED,
+            "timezone": "UTC",
+            "apikey": TWELVE_DATA_API_KEY,
+        },
+        timeout=20,
+    )
     data = resp.json()
-
     if "values" not in data:
         raise RuntimeError(f"Twelve Data error for {td_symbol}: {data}")
 
     candles = []
     for row in reversed(data["values"]):  # API returns newest first
+        t = dt.datetime.strptime(row["datetime"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=UTC)
         candles.append({
             "time": row["datetime"],
+            "dt": t,
             "open": float(row["open"]),
             "high": float(row["high"]),
             "low": float(row["low"]),
@@ -94,32 +97,36 @@ def get_candles(td_symbol: str):
     return candles
 
 
+def drop_unclosed(candles):
+    """Remove the last candle if it is still forming."""
+    if candles:
+        close_time = candles[-1]["dt"] + dt.timedelta(minutes=INTERVAL_MINUTES)
+        if close_time > now_utc():
+            return candles[:-1]
+    return candles
+
+
 # ---------------------------------------------------------------------------
 # Indicators
 # ---------------------------------------------------------------------------
 
 def ema_series(closes, period):
-    """Return an EMA list aligned with `closes` (None where not enough data)."""
     k = 2 / (period + 1)
     ema = [None] * len(closes)
-    sma = sum(closes[:period]) / period
-    ema[period - 1] = sma
+    ema[period - 1] = sum(closes[:period]) / period
     for i in range(period, len(closes)):
         ema[i] = closes[i] * k + ema[i - 1] * (1 - k)
     return ema
 
 
 def atr_series(candles, period):
-    """Average True Range, aligned with `candles` (None where not enough data)."""
-    trs = [None] * len(candles)
-    for i in range(len(candles)):
-        h, l = candles[i]["high"], candles[i]["low"]
+    trs = []
+    for i, c in enumerate(candles):
         if i == 0:
-            trs[i] = h - l
+            trs.append(c["high"] - c["low"])
         else:
-            prev_close = candles[i - 1]["close"]
-            trs[i] = max(h - l, abs(h - prev_close), abs(l - prev_close))
-
+            pc = candles[i - 1]["close"]
+            trs.append(max(c["high"] - c["low"], abs(c["high"] - pc), abs(c["low"] - pc)))
     atr = [None] * len(candles)
     if len(candles) < period:
         return atr
@@ -134,87 +141,84 @@ def atr_series(candles, period):
 # ---------------------------------------------------------------------------
 
 def classify_pinbar(candle):
-    """Return 'bullish', 'bearish' or None."""
     o, h, l, c = candle["open"], candle["high"], candle["low"], candle["close"]
-    body = abs(c - o)
-    if body == 0:
-        body = 1e-9  # avoid div by zero on doji
-
+    body = abs(c - o) or 1e-9
     upper_wick = h - max(o, c)
     lower_wick = min(o, c) - l
 
-    # Bullish pinbar: long lower wick, small body, small upper wick ("nose")
-    if (lower_wick >= PINBAR_WICK_RATIO * body and
-            upper_wick <= PINBAR_NOSE_MAX_RATIO * lower_wick):
+    if lower_wick >= PINBAR_WICK_RATIO * body and upper_wick <= PINBAR_NOSE_MAX_RATIO * lower_wick:
         return "bullish"
-
-    # Bearish pinbar: long upper wick, small body, small lower wick ("nose")
-    if (upper_wick >= PINBAR_WICK_RATIO * body and
-            lower_wick <= PINBAR_NOSE_MAX_RATIO * upper_wick):
+    if upper_wick >= PINBAR_WICK_RATIO * body and lower_wick <= PINBAR_NOSE_MAX_RATIO * upper_wick:
         return "bearish"
-
     return None
 
 
 def touches_ema(candle, ema_value):
-    """True if the candle's range came within tolerance of the EMA15 line."""
-    tolerance = ema_value * (EMA_TOUCH_TOLERANCE_PCT / 100)
-    return candle["low"] - tolerance <= ema_value <= candle["high"] + tolerance
+    tol = ema_value * (EMA_TOUCH_TOLERANCE_PCT / 100)
+    return candle["low"] - tol <= ema_value <= candle["high"] + tol
 
 
 # ---------------------------------------------------------------------------
-# Signal logic
+# Signal logic (candles must contain CLOSED candles only)
 # ---------------------------------------------------------------------------
 
 def check_signal(candles):
+    if len(candles) < max(ATR_PERIOD, EMA_SLOW) + EMA_SLOPE_LOOKBACK + 2:
+        return None
+
     closes = [c["close"] for c in candles]
     ema9 = ema_series(closes, EMA_FAST)
     ema15 = ema_series(closes, EMA_SLOW)
     atr = atr_series(candles, ATR_PERIOD)
 
     i = len(candles) - 1  # last CLOSED candle
-    if ema9[i] is None or ema15[i] is None or atr[i] is None:
+    p = i - 1
+    j = i - EMA_SLOPE_LOOKBACK
+    if None in (ema9[i], ema15[i], atr[i], ema15[p], ema15[j]):
         return None
 
     candle = candles[i]
-    trend_up = ema9[i] > ema15[i]
-    trend_down = ema9[i] < ema15[i]
+    prev = candles[p]
 
     pinbar_type = classify_pinbar(candle)
-    if pinbar_type is None:
-        return None
-    if not touches_ema(candle, ema15[i]):
+    if pinbar_type is None or not touches_ema(candle, ema15[i]):
         return None
 
-    min_sl_distance = MIN_SL_ATR_MULTIPLIER * atr[i]
+    buffer_ = SL_BUFFER_ATR * atr[i]
+    min_sl = MIN_SL_ATR_MULTIPLIER * atr[i]
+
+    trend_up = ema9[i] > ema15[i] and ema15[i] > ema15[j]
+    trend_down = ema9[i] < ema15[i] and ema15[i] < ema15[j]
 
     if pinbar_type == "bullish" and trend_up:
+        if prev["close"] <= ema15[p]:      # previous candle must be above EMA15 (real pullback)
+            return None
         entry = candle["close"]
-        sl = candle["low"]
+        sl = candle["low"] - buffer_
         risk = entry - sl
-        if risk <= 0 or risk < min_sl_distance:
-            return None  # SL too tight relative to current volatility -> skip
-        tp = entry + RISK_REWARD * risk
-        return {"side": "BUY", "entry": entry, "sl": sl, "tp": tp,
-                "time": candle["time"], "candle": candle,
-                "ema9": ema9[i], "ema15": ema15[i], "atr": atr[i]}
+        if risk <= 0 or risk < min_sl:
+            return None
+        side, tp = "BUY", entry + RISK_REWARD * risk
 
-    if pinbar_type == "bearish" and trend_down:
+    elif pinbar_type == "bearish" and trend_down:
+        if prev["close"] >= ema15[p]:      # previous candle must be below EMA15
+            return None
         entry = candle["close"]
-        sl = candle["high"]
+        sl = candle["high"] + buffer_
         risk = sl - entry
-        if risk <= 0 or risk < min_sl_distance:
-            return None  # SL too tight relative to current volatility -> skip
-        tp = entry - RISK_REWARD * risk
-        return {"side": "SELL", "entry": entry, "sl": sl, "tp": tp,
-                "time": candle["time"], "candle": candle,
-                "ema9": ema9[i], "ema15": ema15[i], "atr": atr[i]}
+        if risk <= 0 or risk < min_sl:
+            return None
+        side, tp = "SELL", entry - RISK_REWARD * risk
+    else:
+        return None
 
-    return None
+    return {"side": side, "entry": entry, "sl": sl, "tp": tp,
+            "time": candle["time"], "close_dt": candle["dt"] + dt.timedelta(minutes=INTERVAL_MINUTES),
+            "candle": candle, "ema9": ema9[i], "ema15": ema15[i], "atr": atr[i]}
 
 
 # ---------------------------------------------------------------------------
-# Telegram alert
+# Telegram
 # ---------------------------------------------------------------------------
 
 def send_telegram(message: str):
@@ -226,7 +230,7 @@ def send_telegram(message: str):
 
 
 # ---------------------------------------------------------------------------
-# Simple duplicate-alert guard (per symbol, per candle time)
+# State
 # ---------------------------------------------------------------------------
 
 def load_state():
@@ -242,26 +246,24 @@ def save_state(state):
 
 
 # ---------------------------------------------------------------------------
-# Heartbeat ("bot is alive") message
+# Heartbeat
 # ---------------------------------------------------------------------------
 
 def should_send_heartbeat(state):
     last = state.get("_last_heartbeat")
     if not last:
         return True
-    last_time = datetime.datetime.fromisoformat(last)
-    elapsed_minutes = (datetime.datetime.utcnow() - last_time).total_seconds() / 60
-    return elapsed_minutes >= HEARTBEAT_INTERVAL_MINUTES
+    last_time = dt.datetime.fromisoformat(last)
+    if last_time.tzinfo is None:
+        last_time = last_time.replace(tzinfo=UTC)
+    return (now_utc() - last_time).total_seconds() / 60 >= HEARTBEAT_INTERVAL_MINUTES
 
 
 def send_heartbeat(prices):
-    now = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
-    lines = [f"✅ <b>বট চালু আছে</b> ({now})"]
+    stamp = now_utc().strftime("%Y-%m-%d %H:%M UTC")
+    lines = [f"✅ <b>বট চালু আছে</b> ({stamp})"]
     for name, price in prices.items():
-        if price is not None:
-            lines.append(f"{name}: {price:.3f}")
-        else:
-            lines.append(f"{name}: ডেটা আনতে ব্যর্থ")
+        lines.append(f"{name}: {price:.3f}" if price is not None else f"{name}: ডেটা আনতে ব্যর্থ")
     send_telegram("\n".join(lines))
 
 
@@ -276,52 +278,55 @@ def main():
     for sym in SYMBOLS:
         name = sym["name"]
         try:
-            candles = get_candles(sym["td_symbol"])
+            raw = get_candles(sym["td_symbol"])
         except Exception as e:
             print(f"[{name}] fetch error: {e}")
             last_prices[name] = None
             continue
 
-        last_prices[name] = candles[-1]["close"]
+        last_prices[name] = raw[-1]["close"]   # live price, for heartbeat only
+        candles = drop_unclosed(raw)           # signals use CLOSED candles only
 
         signal = check_signal(candles)
         if not signal:
             print(f"[{name}] no signal")
             continue
 
-        # avoid re-alerting the same candle
+        delay_min = (now_utc() - signal["close_dt"]).total_seconds() / 60
+        if delay_min > MAX_SIGNAL_DELAY_MIN:
+            print(f"[{name}] signal skipped: stale ({delay_min:.0f} min after candle close)")
+            continue
+
         if state.get(name) == signal["time"]:
             print(f"[{name}] signal already sent for {signal['time']}")
             continue
 
-        ohlc = signal["candle"]
+        o = signal["candle"]
         msg = (
             f"📢 <b>{signal['side']} SIGNAL — {name}</b>\n"
-            f"Timeframe: 15M | Pinbar + EMA15 rejection\n"
+            f"Timeframe: 15M | Pinbar + EMA15 rejection (closed candle)\n"
             f"Entry: {signal['entry']:.3f}\n"
             f"SL: {signal['sl']:.3f}\n"
             f"TP: {signal['tp']:.3f}  (1:{RISK_REWARD:.0f} R:R)\n"
-            f"Candle time: {signal['time']}\n"
+            f"Candle open time (UTC): {signal['time']}\n"
             f"\n"
             f"<i>Verify against your own chart:</i>\n"
-            f"O: {ohlc['open']:.3f}  H: {ohlc['high']:.3f}\n"
-            f"L: {ohlc['low']:.3f}  C: {ohlc['close']:.3f}\n"
+            f"O: {o['open']:.3f}  H: {o['high']:.3f}\n"
+            f"L: {o['low']:.3f}  C: {o['close']:.3f}\n"
             f"EMA9: {signal['ema9']:.3f}  EMA15: {signal['ema15']:.3f}\n"
             f"ATR(14): {signal['atr']:.3f}\n"
             f"<i>(data source: Twelve Data — may differ slightly from your broker feed)</i>"
         )
         send_telegram(msg)
-        print(f"[{name}] SIGNAL SENT: {signal}")
-
+        print(f"[{name}] SIGNAL SENT: {signal['side']} @ {signal['entry']}")
         state[name] = signal["time"]
 
     if should_send_heartbeat(state):
         send_heartbeat(last_prices)
-        state["_last_heartbeat"] = datetime.datetime.utcnow().isoformat()
+        state["_last_heartbeat"] = now_utc().isoformat()
 
     save_state(state)
 
 
 if __name__ == "__main__":
     main()
-      
