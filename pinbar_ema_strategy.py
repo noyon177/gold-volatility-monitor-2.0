@@ -1,4 +1,3 @@
-
 import os
 import json
 import datetime as dt
@@ -53,7 +52,8 @@ EMA_SLOPE_LOOKBACK = 3
 
 MAX_SIGNAL_DELAY_MIN = 10
 
-HEARTBEAT_INTERVAL_MINUTES = 60
+# 0 = "বট চালু আছে" message on every run
+HEARTBEAT_INTERVAL_MINUTES = 0
 
 STATE_FILE = Path("last_signal_state.json")
 
