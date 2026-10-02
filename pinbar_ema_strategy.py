@@ -1,4 +1,3 @@
-
 import os
 import json
 import datetime as dt
@@ -7,7 +6,7 @@ from pathlib import Path
 
 # ============================================================
 # EMA 9/15 + PINBAR + 30M SUPPORT / RESISTANCE SCANNER
-# Version 3.0
+# Version 3.1 (improved S/R engine)
 # ============================================================
 
 # ---------------- CONFIGURATION ----------------
@@ -45,7 +44,7 @@ EMA_SLOPE_LOOKBACK = 3
 
 # Candle history
 CANDLES_NEEDED = 150
-SR_LOOKBACK = 100
+SR_LOOKBACK = 150          # ~3 days of 30M candles
 
 # Pinbar settings
 PINBAR_WICK_RATIO = 2.0
@@ -60,10 +59,12 @@ RISK_REWARD = 2.0
 MAX_SIGNAL_DELAY_MIN = 10
 
 # Support / Resistance settings
-SR_PIVOT_LEFT = 2
-SR_PIVOT_RIGHT = 2
-SR_CLUSTER_ATR = 0.25
+SR_PIVOT_LEFT = 3
+SR_PIVOT_RIGHT = 3
+SR_CLUSTER_ATR = 0.5        # zone width = 0.5 x ATR
 SR_MAX_LEVELS = 3
+SR_MIN_TOUCHES = 2          # levels below this are marked weak
+SR_MIN_DISTANCE_ATR = 0.3   # ignore levels too close to price
 
 # Heartbeat
 HEARTBEAT_INTERVAL_MINUTES = 0
@@ -78,7 +79,7 @@ UTC = dt.timezone.utc
 
 SESSION = requests.Session()
 SESSION.headers.update({
-    "User-Agent": "EMA-Pinbar-SR-Scanner/3.0"
+    "User-Agent": "EMA-Pinbar-SR-Scanner/3.1"
 })
 
 
@@ -283,7 +284,7 @@ def touches_ema(candle, ema_value, atr_value, tolerance_multiplier):
 
 
 # ============================================================
-# 30M SUPPORT / RESISTANCE ENGINE
+# 30M SUPPORT / RESISTANCE ENGINE (v2)
 # ============================================================
 
 def calculate_sr_atr(candles, period=14):
@@ -330,122 +331,98 @@ def identify_sr_levels(candles, current_price):
         return empty_result
 
     tolerance = atr * SR_CLUSTER_ATR
-
-    support_candidates = []
-    resistance_candidates = []
+    min_dist = atr * SR_MIN_DISTANCE_ATR
 
     left = SR_PIVOT_LEFT
     right = SR_PIVOT_RIGHT
+    n = len(candles)
 
-    # Confirmed swing points
-    for i in range(left, len(candles) - right):
+    # 1) Confirmed swing highs AND lows, pooled together
+    pivots = []
 
-        candle = candles[i]
+    for i in range(left, n - right):
 
-        left_candles = candles[i-left:i]
-        right_candles = candles[i+1:i+right+1]
+        c = candles[i]
+        left_c = candles[i - left:i]
+        right_c = candles[i + 1:i + right + 1]
 
-        # Swing Low
-        is_swing_low = all(
-            candle["low"] < x["low"]
-            for x in left_candles + right_candles
-        )
+        if (
+            all(c["low"] <= x["low"] for x in left_c)
+            and all(c["low"] < x["low"] for x in right_c)
+        ):
+            pivots.append({"price": c["low"], "idx": i, "time": c["time"]})
 
-        if is_swing_low:
+        if (
+            all(c["high"] >= x["high"] for x in left_c)
+            and all(c["high"] > x["high"] for x in right_c)
+        ):
+            pivots.append({"price": c["high"], "idx": i, "time": c["time"]})
 
-            support_candidates.append({
-                "price": candle["low"],
-                "time": candle["time"],
-            })
+    if not pivots:
+        return empty_result
 
-        # Swing High
-        is_swing_high = all(
-            candle["high"] > x["high"]
-            for x in left_candles + right_candles
-        )
+    # 2) Cluster nearby pivots into zones
+    pivots.sort(key=lambda x: x["price"])
 
-        if is_swing_high:
+    clusters = []
 
-            resistance_candidates.append({
-                "price": candle["high"],
-                "time": candle["time"],
-            })
+    for p in pivots:
 
-    def cluster_levels(candidates):
+        if clusters:
+            avg = sum(x["price"] for x in clusters[-1]) / len(clusters[-1])
 
-        if not candidates:
-            return []
-
-        candidates = sorted(
-            candidates,
-            key=lambda x: x["price"]
-        )
-
-        clusters = []
-
-        for candidate in candidates:
-
-            if not clusters:
-                clusters.append([candidate])
+            if abs(p["price"] - avg) <= tolerance:
+                clusters[-1].append(p)
                 continue
 
-            last_cluster = clusters[-1]
+        clusters.append([p])
 
-            average = sum(
-                x["price"] for x in last_cluster
-            ) / len(last_cluster)
+    levels = []
 
-            if abs(candidate["price"] - average) <= tolerance:
-                last_cluster.append(candidate)
+    for cl in clusters:
 
-            else:
-                clusters.append([candidate])
+        latest = max(cl, key=lambda x: x["idx"])
 
-        levels = []
+        levels.append({
+            "price": sum(x["price"] for x in cl) / len(cl),
+            "touches": len(cl),
+            "time": latest["time"],
+            "weak": len(cl) < SR_MIN_TOUCHES,
+        })
 
-        for cluster in clusters:
+    # 3) Split by side of price (role reversal included)
+    supports = [x for x in levels if x["price"] < current_price - min_dist]
+    resistances = [x for x in levels if x["price"] > current_price + min_dist]
 
-            price = sum(
-                x["price"] for x in cluster
-            ) / len(cluster)
+    def pick(side_levels, is_support):
 
-            levels.append({
-                "price": price,
-                "touches": len(cluster),
-                "time": cluster[-1]["time"],
-            })
+        strong = [x for x in side_levels if not x["weak"]]
+        chosen = strong if strong else side_levels  # weak fallback
 
-        return levels
+        chosen.sort(
+            key=lambda x: (
+                current_price - x["price"]
+                if is_support
+                else x["price"] - current_price
+            )
+        )
 
-    supports = cluster_levels(support_candidates)
-    resistances = cluster_levels(resistance_candidates)
+        return chosen[:SR_MAX_LEVELS]
 
-    # Keep only levels on the relevant side of price
-    supports = [
-        x for x in supports
-        if x["price"] < current_price
-    ]
-
-    resistances = [
-        x for x in resistances
-        if x["price"] > current_price
-    ]
-
-    supports.sort(
-        key=lambda x: current_price - x["price"]
-    )
-
-    resistances.sort(
-        key=lambda x: x["price"] - current_price
-    )
+    supports = pick(supports, True)
+    resistances = pick(resistances, False)
 
     return {
-        "support": supports[:SR_MAX_LEVELS],
-        "resistance": resistances[:SR_MAX_LEVELS],
+        "support": supports,
+        "resistance": resistances,
         "nearest_support": supports[0] if supports else None,
         "nearest_resistance": resistances[0] if resistances else None,
         "atr": atr,
     }
+
+
+def weak_tag(level):
+    return " (দুর্বল)" if level.get("weak") else ""
 
 
 def format_sr_message(sr, current_price):
@@ -462,26 +439,28 @@ def format_sr_message(sr, current_price):
         distance = current_price - support["price"]
 
         lines.extend([
-            f"🟢 Support: <b>{support['price']:.3f}</b>",
+            f"🟢 Support: <b>{support['price']:.3f}</b>{weak_tag(support)}",
             f"Distance: {distance:.3f}",
             f"Swing points: {support['touches']}",
+            f"Latest swing: {support['time']} UTC",
         ])
 
     else:
-        lines.append("🟢 Support: পাওয়া যায়নি")
+        lines.append("🟢 Support: পাওয়া যায়নি")
 
     if resistance:
 
         distance = resistance["price"] - current_price
 
         lines.extend([
-            f"🔴 Resistance: <b>{resistance['price']:.3f}</b>",
+            f"🔴 Resistance: <b>{resistance['price']:.3f}</b>{weak_tag(resistance)}",
             f"Distance: {distance:.3f}",
             f"Swing points: {resistance['touches']}",
+            f"Latest swing: {resistance['time']} UTC",
         ])
 
     else:
-        lines.append("🔴 Resistance: পাওয়া যায়নি")
+        lines.append("🔴 Resistance: পাওয়া যায়নি")
 
     # Additional levels
     if len(sr["support"]) > 1:
@@ -492,7 +471,7 @@ def format_sr_message(sr, current_price):
 
             lines.append(
                 f"• {level['price']:.3f} "
-                f"({level['touches']} swing points)"
+                f"({level['touches']} swing points){weak_tag(level)}"
             )
 
     if len(sr["resistance"]) > 1:
@@ -503,7 +482,7 @@ def format_sr_message(sr, current_price):
 
             lines.append(
                 f"• {level['price']:.3f} "
-                f"({level['touches']} swing points)"
+                f"({level['touches']} swing points){weak_tag(level)}"
             )
 
     lines.append(
@@ -749,8 +728,8 @@ def send_heartbeat(market_data):
     stamp = now_utc().strftime("%Y-%m-%d %H:%M UTC")
 
     lines = [
-        f"✅ <b>বট চালু আছে</b>",
-        f"সময়: {stamp}",
+        "✅ <b>বট চালু আছে</b>",
+        f"সময়: {stamp}",
     ]
 
     for name, data in market_data.items():
@@ -772,16 +751,18 @@ def send_heartbeat(market_data):
         if support:
             lines.append(
                 f"🟢 Support: {support['price']:.3f}"
+                f" ({support['touches']}x){weak_tag(support)}"
             )
         else:
-            lines.append("🟢 Support: পাওয়া যায়নি")
+            lines.append("🟢 Support: পাওয়া যায়নি")
 
         if resistance:
             lines.append(
                 f"🔴 Resistance: {resistance['price']:.3f}"
+                f" ({resistance['touches']}x){weak_tag(resistance)}"
             )
         else:
-            lines.append("🔴 Resistance: পাওয়া যায়নি")
+            lines.append("🔴 Resistance: পাওয়া যায়নি")
 
     return send_telegram("\n".join(lines))
 
@@ -849,15 +830,17 @@ def main():
             )
 
             if sr_data["nearest_support"]:
+                s = sr_data["nearest_support"]
                 print(
-                    f"[{name}] Support: "
-                    f"{sr_data['nearest_support']['price']:.3f}"
+                    f"[{name}] Support: {s['price']:.3f} "
+                    f"({s['touches']}x, {s['time']})"
                 )
 
             if sr_data["nearest_resistance"]:
+                r = sr_data["nearest_resistance"]
                 print(
-                    f"[{name}] Resistance: "
-                    f"{sr_data['nearest_resistance']['price']:.3f}"
+                    f"[{name}] Resistance: {r['price']:.3f} "
+                    f"({r['touches']}x, {r['time']})"
                 )
 
             # ---------------- SIGNAL ----------------
