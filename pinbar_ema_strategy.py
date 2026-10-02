@@ -896,4 +896,69 @@ def main():
 
             message = (
                 f"📢 <b>{signal['side']} SIGNAL — {name}</b>\n"
-                f"Time
+                f"Timeframe: 15M\n"
+                f"Strategy: EMA 9/15 + Pin Bar Rejection\n\n"
+
+                f"Entry: {signal['entry']:.3f}\n"
+                f"SL: {signal['sl']:.3f}\n"
+                f"TP: {signal['tp']:.3f}\n"
+                f"Risk: {signal['risk']:.3f}\n"
+                f"Risk in ATR: {signal['risk_atr']:.2f}\n"
+                f"RR: 1:{RISK_REWARD:.1f}\n\n"
+
+                f"Candle time UTC: {signal['time']}\n"
+                f"Signal delay: {delay_min:.1f} min\n\n"
+
+                f"<b>Confirmation Data</b>\n"
+                f"O: {candle['open']:.3f}\n"
+                f"H: {candle['high']:.3f}\n"
+                f"L: {candle['low']:.3f}\n"
+                f"C: {candle['close']:.3f}\n"
+                f"EMA9: {signal['ema9']:.3f}\n"
+                f"EMA15: {signal['ema15']:.3f}\n"
+                f"ATR14: {signal['atr']:.3f}\n"
+
+                f"{sr_message}\n\n"
+
+                f"⚠️ Verify current market price, spread "
+                f"and slippage before entry.\n"
+                f"<i>Data: Twelve Data. Broker prices may differ.</i>"
+            )
+
+            # Save only after successful delivery
+            send_telegram(message)
+
+            state[name] = signal["time"]
+
+            print(
+                f"[{name}] SIGNAL SENT: "
+                f"{signal['side']} @ {signal['entry']}"
+            )
+
+        except Exception as error:
+
+            print(f"[{name}] ERROR: {error}")
+
+            market_data[name] = None
+
+    # ---------------- HEARTBEAT ----------------
+
+    try:
+
+        if should_send_heartbeat(state):
+
+            send_heartbeat(market_data)
+
+            state["_last_heartbeat"] = (
+                now_utc().isoformat()
+            )
+
+    except Exception as error:
+
+        print(f"Heartbeat error: {error}")
+
+    save_state(state)
+
+
+if __name__ == "__main__":
+    main()
