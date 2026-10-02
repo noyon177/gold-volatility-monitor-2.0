@@ -1,3 +1,4 @@
+
 import os
 import json
 import datetime as dt
@@ -5,11 +6,16 @@ import requests
 from pathlib import Path
 
 # ============================================================
-# EMA 9/15 + PINBAR + 30M SUPPORT / RESISTANCE SCANNER
-# Version 3.1 (improved S/R engine)
+# EMA 9/15 + PINBAR + DYNAMIC MULTI-TF SUPPORT / RESISTANCE
+# Version 4.0
+#
+# Main changes:
+# - No hard-coded XAUUSD/BTCUSD S/R prices.
+# - 30M S/R uses confirmed swing pivots + ATR clustering.
+# - Repeated + recent touches receive more weight.
+# - 4H S/R is added as higher-timeframe context.
+# - Existing EMA 9/15 + pinbar signal logic is retained.
 # ============================================================
-
-# ---------------- CONFIGURATION ----------------
 
 SYMBOLS = [
     {
@@ -18,6 +24,7 @@ SYMBOLS = [
         "touch_atr": 0.15,
         "min_sl_atr": 1.0,
         "max_sl_atr": 2.5,
+        "digits": 3,
     },
     {
         "name": "BTCUSD",
@@ -25,48 +32,53 @@ SYMBOLS = [
         "touch_atr": 0.15,
         "min_sl_atr": 1.0,
         "max_sl_atr": 2.5,
+        "digits": 3,
     },
 ]
 
-# Entry timeframe
 INTERVAL = "15min"
 INTERVAL_MINUTES = 15
 
-# Support / Resistance timeframe
 SR_INTERVAL = "30min"
 SR_INTERVAL_MINUTES = 30
 
-# Indicators
+# Higher-timeframe S/R context
+HTF_SR_ENABLED = True
+HTF_SR_INTERVAL = "4h"
+HTF_SR_INTERVAL_MINUTES = 240
+
 EMA_FAST = 9
 EMA_SLOW = 15
 ATR_PERIOD = 14
 EMA_SLOPE_LOOKBACK = 3
 
-# Candle history
 CANDLES_NEEDED = 150
-SR_LOOKBACK = 150          # ~3 days of 30M candles
+SR_LOOKBACK = 180
+HTF_SR_LOOKBACK = 120
 
-# Pinbar settings
 PINBAR_WICK_RATIO = 2.0
 PINBAR_NOSE_MAX_RATIO = 0.40
 CLOSE_POSITION_LIMIT = 0.30
 
-# Risk management
 SL_BUFFER_ATR = 0.10
 RISK_REWARD = 2.0
 
-# Signal timing
 MAX_SIGNAL_DELAY_MIN = 10
 
-# Support / Resistance settings
+# Dynamic S/R
 SR_PIVOT_LEFT = 3
 SR_PIVOT_RIGHT = 3
-SR_CLUSTER_ATR = 0.5        # zone width = 0.5 x ATR
+SR_CLUSTER_ATR = 0.35
 SR_MAX_LEVELS = 3
-SR_MIN_TOUCHES = 2          # levels below this are marked weak
-SR_MIN_DISTANCE_ATR = 0.3   # ignore levels too close to price
+SR_MIN_TOUCHES = 2
+SR_MIN_DISTANCE_ATR = 0.20
 
-# Heartbeat
+# Recency weighting: after this many bars, a pivot's
+# recency contribution is reduced by roughly 50%.
+SR_RECENCY_HALF_LIFE_BARS = 48
+SR_HTF_WEIGHT = 1.35
+
+# 0 = send heartbeat every run, as in your old version.
 HEARTBEAT_INTERVAL_MINUTES = 0
 
 STATE_FILE = Path("last_signal_state.json")
@@ -79,7 +91,7 @@ UTC = dt.timezone.utc
 
 SESSION = requests.Session()
 SESSION.headers.update({
-    "User-Agent": "EMA-Pinbar-SR-Scanner/3.1"
+    "User-Agent": "EMA-Pinbar-Dynamic-SR-Scanner/4.0"
 })
 
 
@@ -96,7 +108,6 @@ def now_utc():
 # ============================================================
 
 def get_candles(td_symbol, interval, outputsize):
-
     if not TWELVE_DATA_API_KEY:
         raise RuntimeError("Missing TWELVE_DATA_API_KEY")
 
@@ -121,7 +132,6 @@ def get_candles(td_symbol, interval, outputsize):
     candles = []
 
     for row in reversed(data["values"]):
-
         timestamp = dt.datetime.strptime(
             row["datetime"],
             "%Y-%m-%d %H:%M:%S"
@@ -140,23 +150,15 @@ def get_candles(td_symbol, interval, outputsize):
 
 
 def drop_unclosed(candles, interval_minutes):
-
-    if not candles:
-        return []
-
     current_time = now_utc()
-    closed = []
 
-    for candle in candles:
-
-        close_time = candle["dt"] + dt.timedelta(
+    return [
+        candle
+        for candle in candles
+        if candle["dt"] + dt.timedelta(
             minutes=interval_minutes
-        )
-
-        if close_time <= current_time:
-            closed.append(candle)
-
-    return closed
+        ) <= current_time
+    ]
 
 
 # ============================================================
@@ -164,7 +166,6 @@ def drop_unclosed(candles, interval_minutes):
 # ============================================================
 
 def ema_series(values, period):
-
     result = [None] * len(values)
 
     if len(values) < period:
@@ -175,7 +176,6 @@ def ema_series(values, period):
     result[period - 1] = sum(values[:period]) / period
 
     for i in range(period, len(values)):
-
         result[i] = (
             values[i] * k
             + result[i - 1] * (1 - k)
@@ -185,17 +185,14 @@ def ema_series(values, period):
 
 
 def atr_series(candles, period):
-
     if not candles:
         return []
 
     true_ranges = []
 
     for i, candle in enumerate(candles):
-
         if i == 0:
             tr = candle["high"] - candle["low"]
-
         else:
             previous_close = candles[i - 1]["close"]
 
@@ -217,7 +214,6 @@ def atr_series(candles, period):
     )
 
     for i in range(period, len(candles)):
-
         result[i] = (
             result[i - 1] * (period - 1)
             + true_ranges[i]
@@ -227,11 +223,10 @@ def atr_series(candles, period):
 
 
 # ============================================================
-# PINBAR DETECTION
+# PINBAR
 # ============================================================
 
 def classify_pinbar(candle):
-
     o = candle["open"]
     h = candle["high"]
     l = candle["low"]
@@ -243,12 +238,17 @@ def classify_pinbar(candle):
         return None
 
     body = abs(c - o)
-    body_for_ratio = max(body, candle_range * 0.01)
+    body_for_ratio = max(
+        body,
+        candle_range * 0.01
+    )
 
     upper_wick = h - max(o, c)
     lower_wick = min(o, c) - l
 
-    close_position = (c - l) / candle_range
+    close_position = (
+        (c - l) / candle_range
+    )
 
     # Bullish rejection
     if (
@@ -273,8 +273,12 @@ def classify_pinbar(candle):
 # EMA TOUCH
 # ============================================================
 
-def touches_ema(candle, ema_value, atr_value, tolerance_multiplier):
-
+def touches_ema(
+    candle,
+    ema_value,
+    atr_value,
+    tolerance_multiplier
+):
     tolerance = atr_value * tolerance_multiplier
 
     return (
@@ -284,18 +288,16 @@ def touches_ema(candle, ema_value, atr_value, tolerance_multiplier):
 
 
 # ============================================================
-# 30M SUPPORT / RESISTANCE ENGINE (v2)
+# DYNAMIC SUPPORT / RESISTANCE
 # ============================================================
 
 def calculate_sr_atr(candles, period=14):
-
     if len(candles) < period + 1:
         return None
 
     trs = []
 
     for i in range(1, len(candles)):
-
         current = candles[i]
         previous = candles[i - 1]
 
@@ -310,11 +312,152 @@ def calculate_sr_atr(candles, period=14):
     return sum(trs[-period:]) / period
 
 
-def identify_sr_levels(candles, current_price):
+def find_pivots(candles):
+    left = SR_PIVOT_LEFT
+    right = SR_PIVOT_RIGHT
+    n = len(candles)
 
-    candles = candles[-SR_LOOKBACK:]
+    pivots = []
 
-    empty_result = {
+    for i in range(left, n - right):
+        candle = candles[i]
+
+        left_candles = candles[i - left:i]
+        right_candles = candles[i + 1:i + right + 1]
+
+        is_low = (
+            all(
+                candle["low"] <= x["low"]
+                for x in left_candles
+            )
+            and all(
+                candle["low"] < x["low"]
+                for x in right_candles
+            )
+        )
+
+        is_high = (
+            all(
+                candle["high"] >= x["high"]
+                for x in left_candles
+            )
+            and all(
+                candle["high"] > x["high"]
+                for x in right_candles
+            )
+        )
+
+        if is_low:
+            pivots.append({
+                "price": candle["low"],
+                "idx": i,
+                "time": candle["time"],
+                "kind": "low",
+            })
+
+        if is_high:
+            pivots.append({
+                "price": candle["high"],
+                "idx": i,
+                "time": candle["time"],
+                "kind": "high",
+            })
+
+    return pivots
+
+
+def cluster_pivots(pivots, tolerance):
+    if not pivots:
+        return []
+
+    # Price-based clustering.
+    pivots = sorted(
+        pivots,
+        key=lambda x: x["price"]
+    )
+
+    clusters = []
+
+    for pivot in pivots:
+        if not clusters:
+            clusters.append([pivot])
+            continue
+
+        average_price = (
+            sum(x["price"] for x in clusters[-1])
+            / len(clusters[-1])
+        )
+
+        if abs(
+            pivot["price"] - average_price
+        ) <= tolerance:
+            clusters[-1].append(pivot)
+        else:
+            clusters.append([pivot])
+
+    return clusters
+
+
+def level_strength(cluster, total_bars):
+    """
+    Strength combines:
+    - number of touches
+    - recency of touches
+    - a small bonus for a recently active zone
+    """
+
+    strength = 0.0
+
+    latest_idx = max(
+        x["idx"] for x in cluster
+    )
+
+    for pivot in cluster:
+        age = max(
+            0,
+            total_bars - 1 - pivot["idx"]
+        )
+
+        decay = (
+            0.5 ** (
+                age / SR_RECENCY_HALF_LIFE_BARS
+            )
+        )
+
+        strength += decay
+
+    touch_bonus = min(
+        len(cluster),
+        8
+    ) * 0.75
+
+    recent_bonus = (
+        1.0
+        if latest_idx >= total_bars * 0.75
+        else 0.0
+    )
+
+    return (
+        strength
+        + touch_bonus
+        + recent_bonus
+    )
+
+
+def build_sr_levels(
+    candles,
+    current_price,
+    htf=False
+):
+    lookback = (
+        HTF_SR_LOOKBACK
+        if htf
+        else SR_LOOKBACK
+    )
+
+    candles = candles[-lookback:]
+
+    empty = {
         "support": [],
         "resistance": [],
         "nearest_support": None,
@@ -323,170 +466,303 @@ def identify_sr_levels(candles, current_price):
     }
 
     if len(candles) < 30:
-        return empty_result
+        return empty
 
     atr = calculate_sr_atr(candles)
 
     if atr is None or atr <= 0:
-        return empty_result
+        return empty
 
-    tolerance = atr * SR_CLUSTER_ATR
-    min_dist = atr * SR_MIN_DISTANCE_ATR
+    tolerance = atr * (
+        SR_CLUSTER_ATR * (
+            1.25 if htf else 1.0
+        )
+    )
 
-    left = SR_PIVOT_LEFT
-    right = SR_PIVOT_RIGHT
-    n = len(candles)
+    min_distance = (
+        atr * SR_MIN_DISTANCE_ATR
+    )
 
-    # 1) Confirmed swing highs AND lows, pooled together
-    pivots = []
+    pivots = find_pivots(candles)
 
-    for i in range(left, n - right):
-
-        c = candles[i]
-        left_c = candles[i - left:i]
-        right_c = candles[i + 1:i + right + 1]
-
-        if (
-            all(c["low"] <= x["low"] for x in left_c)
-            and all(c["low"] < x["low"] for x in right_c)
-        ):
-            pivots.append({"price": c["low"], "idx": i, "time": c["time"]})
-
-        if (
-            all(c["high"] >= x["high"] for x in left_c)
-            and all(c["high"] > x["high"] for x in right_c)
-        ):
-            pivots.append({"price": c["high"], "idx": i, "time": c["time"]})
-
-    if not pivots:
-        return empty_result
-
-    # 2) Cluster nearby pivots into zones
-    pivots.sort(key=lambda x: x["price"])
-
-    clusters = []
-
-    for p in pivots:
-
-        if clusters:
-            avg = sum(x["price"] for x in clusters[-1]) / len(clusters[-1])
-
-            if abs(p["price"] - avg) <= tolerance:
-                clusters[-1].append(p)
-                continue
-
-        clusters.append([p])
+    clusters = cluster_pivots(
+        pivots,
+        tolerance
+    )
 
     levels = []
 
-    for cl in clusters:
+    for cluster in clusters:
+        price = (
+            sum(x["price"] for x in cluster)
+            / len(cluster)
+        )
 
-        latest = max(cl, key=lambda x: x["idx"])
+        latest = max(
+            cluster,
+            key=lambda x: x["idx"]
+        )
+
+        strength = level_strength(
+            cluster,
+            len(candles)
+        )
+
+        if htf:
+            strength *= SR_HTF_WEIGHT
 
         levels.append({
-            "price": sum(x["price"] for x in cl) / len(cl),
-            "touches": len(cl),
+            "price": price,
+            "touches": len(cluster),
             "time": latest["time"],
-            "weak": len(cl) < SR_MIN_TOUCHES,
+            "weak": (
+                len(cluster)
+                < SR_MIN_TOUCHES
+            ),
+            "strength": strength,
+            "timeframe": (
+                "4H" if htf else "30M"
+            ),
         })
 
-    # 3) Split by side of price (role reversal included)
-    supports = [x for x in levels if x["price"] < current_price - min_dist]
-    resistances = [x for x in levels if x["price"] > current_price + min_dist]
+    supports = [
+        x for x in levels
+        if x["price"]
+        < current_price - min_distance
+    ]
 
-    def pick(side_levels, is_support):
+    resistances = [
+        x for x in levels
+        if x["price"]
+        > current_price + min_distance
+    ]
 
-        strong = [x for x in side_levels if not x["weak"]]
-        chosen = strong if strong else side_levels  # weak fallback
+    def selection_score(
+        level,
+        support
+    ):
+        distance = (
+            current_price - level["price"]
+            if support
+            else level["price"] - current_price
+        )
 
-        chosen.sort(
-            key=lambda x: (
-                current_price - x["price"]
-                if is_support
-                else x["price"] - current_price
+        distance_atr = (
+            distance / atr
+        )
+
+        proximity = (
+            1 / (
+                1 + max(
+                    distance_atr,
+                    0
+                )
             )
         )
 
-        return chosen[:SR_MAX_LEVELS]
+        return (
+            level["strength"] * 0.65
+            + proximity * 4.0
+        )
 
-    supports = pick(supports, True)
-    resistances = pick(resistances, False)
+    supports.sort(
+        key=lambda x: selection_score(
+            x,
+            True
+        ),
+        reverse=True
+    )
+
+    resistances.sort(
+        key=lambda x: selection_score(
+            x,
+            False
+        ),
+        reverse=True
+    )
+
+    nearest_support = (
+        min(
+            supports,
+            key=lambda x:
+            current_price - x["price"]
+        )
+        if supports
+        else None
+    )
+
+    nearest_resistance = (
+        min(
+            resistances,
+            key=lambda x:
+            x["price"] - current_price
+        )
+        if resistances
+        else None
+    )
 
     return {
-        "support": supports,
-        "resistance": resistances,
-        "nearest_support": supports[0] if supports else None,
-        "nearest_resistance": resistances[0] if resistances else None,
+        "support": supports[:SR_MAX_LEVELS],
+        "resistance": resistances[:SR_MAX_LEVELS],
+        "nearest_support": nearest_support,
+        "nearest_resistance": nearest_resistance,
         "atr": atr,
     }
 
 
+def identify_sr_levels(
+    candles,
+    current_price,
+    htf_candles=None
+):
+    base = build_sr_levels(
+        candles,
+        current_price,
+        htf=False
+    )
+
+    if (
+        HTF_SR_ENABLED
+        and htf_candles
+    ):
+        htf = build_sr_levels(
+            htf_candles,
+            current_price,
+            htf=True
+        )
+
+        base["htf_support"] = (
+            htf["nearest_support"]
+        )
+
+        base["htf_resistance"] = (
+            htf["nearest_resistance"]
+        )
+
+        base["htf_supports"] = (
+            htf["support"]
+        )
+
+        base["htf_resistances"] = (
+            htf["resistance"]
+        )
+
+    else:
+        base["htf_support"] = None
+        base["htf_resistance"] = None
+        base["htf_supports"] = []
+        base["htf_resistances"] = []
+
+    return base
+
+
 def weak_tag(level):
-    return " (দুর্বল)" if level.get("weak") else ""
+    return (
+        " (দুর্বল)"
+        if level.get("weak")
+        else ""
+    )
 
 
-def format_sr_message(sr, current_price):
+def format_level(
+    level,
+    digits=3
+):
+    return (
+        f"{level['price']:.{digits}f} "
+        f"({level['touches']}x, "
+        f"{level['timeframe']})"
+        f"{weak_tag(level)}"
+    )
 
+
+def format_sr_message(
+    sr,
+    current_price,
+    digits=3
+):
     lines = [
-        "\n📊 <b>30M SUPPORT / RESISTANCE</b>"
+        "\n📊 <b>DYNAMIC "
+        "SUPPORT / RESISTANCE</b>"
     ]
 
-    support = sr["nearest_support"]
-    resistance = sr["nearest_resistance"]
+    support = sr.get(
+        "nearest_support"
+    )
+
+    resistance = sr.get(
+        "nearest_resistance"
+    )
 
     if support:
-
-        distance = current_price - support["price"]
-
         lines.extend([
-            f"🟢 Support: <b>{support['price']:.3f}</b>{weak_tag(support)}",
-            f"Distance: {distance:.3f}",
-            f"Swing points: {support['touches']}",
-            f"Latest swing: {support['time']} UTC",
+            f"🟢 Support: "
+            f"<b>{support['price']:.{digits}f}</b>"
+            f"{weak_tag(support)}",
+            f"Distance: "
+            f"{current_price - support['price']:.{digits}f}",
         ])
-
     else:
-        lines.append("🟢 Support: পাওয়া যায়নি")
+        lines.append(
+            "🟢 Support: পাওয়া যায়নি"
+        )
 
     if resistance:
-
-        distance = resistance["price"] - current_price
-
         lines.extend([
-            f"🔴 Resistance: <b>{resistance['price']:.3f}</b>{weak_tag(resistance)}",
-            f"Distance: {distance:.3f}",
-            f"Swing points: {resistance['touches']}",
-            f"Latest swing: {resistance['time']} UTC",
+            f"🔴 Resistance: "
+            f"<b>{resistance['price']:.{digits}f}</b>"
+            f"{weak_tag(resistance)}",
+            f"Distance: "
+            f"{resistance['price'] - current_price:.{digits}f}",
         ])
-
     else:
-        lines.append("🔴 Resistance: পাওয়া যায়নি")
+        lines.append(
+            "🔴 Resistance: পাওয়া যায়নি"
+        )
 
-    # Additional levels
-    if len(sr["support"]) > 1:
+    if sr.get("support"):
+        lines.append(
+            "\n<b>30M Support Zones</b>"
+        )
 
-        lines.append("\n<b>Other Support Levels</b>")
-
-        for level in sr["support"][1:]:
-
+        for level in sr["support"]:
             lines.append(
-                f"• {level['price']:.3f} "
-                f"({level['touches']} swing points){weak_tag(level)}"
+                "• "
+                + format_level(
+                    level,
+                    digits
+                )
             )
 
-    if len(sr["resistance"]) > 1:
+    if sr.get("resistance"):
+        lines.append(
+            "\n<b>30M Resistance Zones</b>"
+        )
 
-        lines.append("\n<b>Other Resistance Levels</b>")
-
-        for level in sr["resistance"][1:]:
-
+        for level in sr["resistance"]:
             lines.append(
-                f"• {level['price']:.3f} "
-                f"({level['touches']} swing points){weak_tag(level)}"
+                "• "
+                + format_level(
+                    level,
+                    digits
+                )
             )
+
+    if sr.get("htf_support"):
+        lines.append(
+            "\n🟢 4H Context Support: "
+            f"<b>{sr['htf_support']['price']:.{digits}f}</b>"
+        )
+
+    if sr.get("htf_resistance"):
+        lines.append(
+            "🔴 4H Context Resistance: "
+            f"<b>{sr['htf_resistance']['price']:.{digits}f}</b>"
+        )
 
     lines.append(
-        "\n<i>Calculated from closed 30M candles.</i>"
+        "\n<i>Calculated from closed candles; "
+        "levels update automatically.</i>"
     )
 
     return "\n".join(lines)
@@ -496,10 +772,15 @@ def format_sr_message(sr, current_price):
 # SIGNAL ENGINE
 # ============================================================
 
-def check_signal(candles, config):
-
+def check_signal(
+    candles,
+    config
+):
     minimum_candles = (
-        max(ATR_PERIOD, EMA_SLOW)
+        max(
+            ATR_PERIOD,
+            EMA_SLOW
+        )
         + EMA_SLOPE_LOOKBACK
         + 2
     )
@@ -507,35 +788,53 @@ def check_signal(candles, config):
     if len(candles) < minimum_candles:
         return None
 
-    closes = [c["close"] for c in candles]
+    closes = [
+        c["close"]
+        for c in candles
+    ]
 
-    ema9 = ema_series(closes, EMA_FAST)
-    ema15 = ema_series(closes, EMA_SLOW)
-    atr = atr_series(candles, ATR_PERIOD)
+    ema9 = ema_series(
+        closes,
+        EMA_FAST
+    )
+
+    ema15 = ema_series(
+        closes,
+        EMA_SLOW
+    )
+
+    atr = atr_series(
+        candles,
+        ATR_PERIOD
+    )
 
     i = len(candles) - 1
     p = i - 1
     j = i - EMA_SLOPE_LOOKBACK
 
-    if any(x is None for x in (
-        ema9[i],
-        ema15[i],
-        atr[i],
-        ema15[p],
-        ema15[j],
-        ema9[j],
-    )):
+    if any(
+        x is None
+        for x in (
+            ema9[i],
+            ema15[i],
+            atr[i],
+            ema15[p],
+            ema15[j],
+            ema9[j],
+        )
+    ):
         return None
 
     candle = candles[i]
     previous = candles[p]
-
     atr_now = atr[i]
 
     if atr_now <= 0:
         return None
 
-    pinbar_type = classify_pinbar(candle)
+    pinbar_type = classify_pinbar(
+        candle
+    )
 
     if pinbar_type is None:
         return None
@@ -544,7 +843,7 @@ def check_signal(candles, config):
         candle,
         ema15[i],
         atr_now,
-        config["touch_atr"],
+        config["touch_atr"]
     ):
         return None
 
@@ -560,23 +859,32 @@ def check_signal(candles, config):
         and ema9[i] < ema9[j]
     )
 
-    buffer_distance = SL_BUFFER_ATR * atr_now
+    buffer_distance = (
+        SL_BUFFER_ATR * atr_now
+    )
 
     # BUY
-    if pinbar_type == "bullish" and trend_up:
-
+    if (
+        pinbar_type == "bullish"
+        and trend_up
+    ):
         if previous["close"] <= ema15[p]:
             return None
 
         entry = candle["close"]
-        sl = candle["low"] - buffer_distance
+        sl = (
+            candle["low"]
+            - buffer_distance
+        )
 
         risk = entry - sl
 
         if risk <= 0:
             return None
 
-        risk_atr = risk / atr_now
+        risk_atr = (
+            risk / atr_now
+        )
 
         if not (
             config["min_sl_atr"]
@@ -585,24 +893,35 @@ def check_signal(candles, config):
         ):
             return None
 
-        tp = entry + RISK_REWARD * risk
+        tp = (
+            entry
+            + RISK_REWARD * risk
+        )
+
         side = "BUY"
 
     # SELL
-    elif pinbar_type == "bearish" and trend_down:
-
+    elif (
+        pinbar_type == "bearish"
+        and trend_down
+    ):
         if previous["close"] >= ema15[p]:
             return None
 
         entry = candle["close"]
-        sl = candle["high"] + buffer_distance
+        sl = (
+            candle["high"]
+            + buffer_distance
+        )
 
         risk = sl - entry
 
         if risk <= 0:
             return None
 
-        risk_atr = risk / atr_now
+        risk_atr = (
+            risk / atr_now
+        )
 
         if not (
             config["min_sl_atr"]
@@ -611,14 +930,21 @@ def check_signal(candles, config):
         ):
             return None
 
-        tp = entry - RISK_REWARD * risk
+        tp = (
+            entry
+            - RISK_REWARD * risk
+        )
+
         side = "SELL"
 
     else:
         return None
 
-    close_dt = candle["dt"] + dt.timedelta(
-        minutes=INTERVAL_MINUTES
+    close_dt = (
+        candle["dt"]
+        + dt.timedelta(
+            minutes=INTERVAL_MINUTES
+        )
     )
 
     return {
@@ -642,12 +968,16 @@ def check_signal(candles, config):
 # ============================================================
 
 def send_telegram(message):
-
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        raise RuntimeError("Missing Telegram credentials")
+    if (
+        not TELEGRAM_BOT_TOKEN
+        or not TELEGRAM_CHAT_ID
+    ):
+        raise RuntimeError(
+            "Missing Telegram credentials"
+        )
 
     url = (
-        f"https://api.telegram.org/bot"
+        "https://api.telegram.org/bot"
         f"{TELEGRAM_BOT_TOKEN}/sendMessage"
     )
 
@@ -656,292 +986,4 @@ def send_telegram(message):
         data={
             "chat_id": TELEGRAM_CHAT_ID,
             "text": message,
-            "parse_mode": "HTML",
-        },
-        timeout=20,
-    )
-
-    response.raise_for_status()
-
-    result = response.json()
-
-    if not result.get("ok"):
-        raise RuntimeError(
-            f"Telegram rejected message: {result}"
-        )
-
-    return True
-
-
-# ============================================================
-# STATE MANAGEMENT
-# ============================================================
-
-def load_state():
-
-    if not STATE_FILE.exists():
-        return {}
-
-    try:
-        with STATE_FILE.open("r", encoding="utf-8") as f:
-            return json.load(f)
-
-    except (json.JSONDecodeError, OSError):
-        return {}
-
-
-def save_state(state):
-
-    temp_file = STATE_FILE.with_suffix(".tmp")
-
-    with temp_file.open("w", encoding="utf-8") as f:
-        json.dump(state, f, indent=2)
-
-    temp_file.replace(STATE_FILE)
-
-
-# ============================================================
-# HEARTBEAT
-# ============================================================
-
-def should_send_heartbeat(state):
-
-    last = state.get("_last_heartbeat")
-
-    if not last:
-        return True
-
-    last_time = dt.datetime.fromisoformat(last)
-
-    if last_time.tzinfo is None:
-        last_time = last_time.replace(tzinfo=UTC)
-
-    elapsed = (
-        now_utc() - last_time
-    ).total_seconds() / 60
-
-    return elapsed >= HEARTBEAT_INTERVAL_MINUTES
-
-
-def send_heartbeat(market_data):
-
-    stamp = now_utc().strftime("%Y-%m-%d %H:%M UTC")
-
-    lines = [
-        "✅ <b>বট চালু আছে</b>",
-        f"সময়: {stamp}",
-    ]
-
-    for name, data in market_data.items():
-
-        lines.append(f"\n<b>{name}</b>")
-
-        if data is None:
-            lines.append("ডেটা আনতে ব্যর্থ")
-            continue
-
-        price = data["price"]
-        sr = data["sr"]
-
-        lines.append(f"Price: {price:.3f}")
-
-        support = sr["nearest_support"]
-        resistance = sr["nearest_resistance"]
-
-        if support:
-            lines.append(
-                f"🟢 Support: {support['price']:.3f}"
-                f" ({support['touches']}x){weak_tag(support)}"
-            )
-        else:
-            lines.append("🟢 Support: পাওয়া যায়নি")
-
-        if resistance:
-            lines.append(
-                f"🔴 Resistance: {resistance['price']:.3f}"
-                f" ({resistance['touches']}x){weak_tag(resistance)}"
-            )
-        else:
-            lines.append("🔴 Resistance: পাওয়া যায়নি")
-
-    return send_telegram("\n".join(lines))
-
-
-# ============================================================
-# MAIN
-# ============================================================
-
-def main():
-
-    state = load_state()
-    market_data = {}
-
-    for config in SYMBOLS:
-
-        name = config["name"]
-
-        try:
-
-            # ---------------- 15M DATA ----------------
-
-            raw = get_candles(
-                config["td_symbol"],
-                interval=INTERVAL,
-                outputsize=CANDLES_NEEDED,
-            )
-
-            candles = drop_unclosed(
-                raw,
-                INTERVAL_MINUTES,
-            )
-
-            if not candles:
-                print(f"[{name}] No closed 15M candles")
-                market_data[name] = None
-                continue
-
-            current_price = candles[-1]["close"]
-
-            # ---------------- 30M DATA ----------------
-
-            sr_raw = get_candles(
-                config["td_symbol"],
-                interval=SR_INTERVAL,
-                outputsize=SR_LOOKBACK + 20,
-            )
-
-            sr_candles = drop_unclosed(
-                sr_raw,
-                SR_INTERVAL_MINUTES,
-            )
-
-            sr_data = identify_sr_levels(
-                sr_candles,
-                current_price,
-            )
-
-            market_data[name] = {
-                "price": current_price,
-                "sr": sr_data,
-            }
-
-            print(
-                f"[{name}] Price: {current_price:.3f}"
-            )
-
-            if sr_data["nearest_support"]:
-                s = sr_data["nearest_support"]
-                print(
-                    f"[{name}] Support: {s['price']:.3f} "
-                    f"({s['touches']}x, {s['time']})"
-                )
-
-            if sr_data["nearest_resistance"]:
-                r = sr_data["nearest_resistance"]
-                print(
-                    f"[{name}] Resistance: {r['price']:.3f} "
-                    f"({r['touches']}x, {r['time']})"
-                )
-
-            # ---------------- SIGNAL ----------------
-
-            signal = check_signal(candles, config)
-
-            if not signal:
-                print(f"[{name}] No signal")
-                continue
-
-            delay_min = (
-                now_utc() - signal["close_dt"]
-            ).total_seconds() / 60
-
-            if delay_min < 0:
-                print(f"[{name}] Candle close time is in future")
-                continue
-
-            if delay_min > MAX_SIGNAL_DELAY_MIN:
-                print(
-                    f"[{name}] Stale signal skipped "
-                    f"({delay_min:.1f} minutes)"
-                )
-                continue
-
-            if state.get(name) == signal["time"]:
-                print(f"[{name}] Duplicate signal skipped")
-                continue
-
-            candle = signal["candle"]
-
-            sr_message = format_sr_message(
-                sr_data,
-                signal["entry"],
-            )
-
-            message = (
-                f"📢 <b>{signal['side']} SIGNAL — {name}</b>\n"
-                f"Timeframe: 15M\n"
-                f"Strategy: EMA 9/15 + Pin Bar Rejection\n\n"
-
-                f"Entry: {signal['entry']:.3f}\n"
-                f"SL: {signal['sl']:.3f}\n"
-                f"TP: {signal['tp']:.3f}\n"
-                f"Risk: {signal['risk']:.3f}\n"
-                f"Risk in ATR: {signal['risk_atr']:.2f}\n"
-                f"RR: 1:{RISK_REWARD:.1f}\n\n"
-
-                f"Candle time UTC: {signal['time']}\n"
-                f"Signal delay: {delay_min:.1f} min\n\n"
-
-                f"<b>Confirmation Data</b>\n"
-                f"O: {candle['open']:.3f}\n"
-                f"H: {candle['high']:.3f}\n"
-                f"L: {candle['low']:.3f}\n"
-                f"C: {candle['close']:.3f}\n"
-                f"EMA9: {signal['ema9']:.3f}\n"
-                f"EMA15: {signal['ema15']:.3f}\n"
-                f"ATR14: {signal['atr']:.3f}\n"
-
-                f"{sr_message}\n\n"
-
-                f"⚠️ Verify current market price, spread "
-                f"and slippage before entry.\n"
-                f"<i>Data: Twelve Data. Broker prices may differ.</i>"
-            )
-
-            # Save only after successful delivery
-            send_telegram(message)
-
-            state[name] = signal["time"]
-
-            print(
-                f"[{name}] SIGNAL SENT: "
-                f"{signal['side']} @ {signal['entry']}"
-            )
-
-        except Exception as error:
-
-            print(f"[{name}] ERROR: {error}")
-
-            market_data[name] = None
-
-    # ---------------- HEARTBEAT ----------------
-
-    try:
-
-        if should_send_heartbeat(state):
-
-            send_heartbeat(market_data)
-
-            state["_last_heartbeat"] = (
-                now_utc().isoformat()
-            )
-
-    except Exception as error:
-
-        print(f"Heartbeat error: {error}")
-
-    save_state(state)
-
-
-if __name__ == "__main__":
-    main()
+            "parse_mode":
