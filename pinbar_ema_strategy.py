@@ -1,3 +1,4 @@
+
 import os
 import json
 import datetime as dt
@@ -5,8 +6,8 @@ import requests
 from pathlib import Path
 
 # ============================================================
-# PINBAR + EMA 9/15 TREND REJECTION SCANNER
-# Revised version
+# EMA 9/15 + PINBAR + 30M SUPPORT / RESISTANCE SCANNER
+# Version 3.0
 # ============================================================
 
 # ---------------- CONFIGURATION ----------------
@@ -18,7 +19,6 @@ SYMBOLS = [
         "touch_atr": 0.15,
         "min_sl_atr": 1.0,
         "max_sl_atr": 2.5,
-        "max_entry_deviation_atr": 0.50,
     },
     {
         "name": "BTCUSD",
@@ -26,33 +26,46 @@ SYMBOLS = [
         "touch_atr": 0.15,
         "min_sl_atr": 1.0,
         "max_sl_atr": 2.5,
-        "max_entry_deviation_atr": 0.50,
     },
 ]
 
+# Entry timeframe
 INTERVAL = "15min"
 INTERVAL_MINUTES = 15
 
+# Support / Resistance timeframe
+SR_INTERVAL = "30min"
+SR_INTERVAL_MINUTES = 30
+
+# Indicators
 EMA_FAST = 9
 EMA_SLOW = 15
 ATR_PERIOD = 14
+EMA_SLOPE_LOOKBACK = 3
 
+# Candle history
 CANDLES_NEEDED = 150
+SR_LOOKBACK = 100
 
+# Pinbar settings
 PINBAR_WICK_RATIO = 2.0
 PINBAR_NOSE_MAX_RATIO = 0.40
-
-# Candle close should be near the extreme
 CLOSE_POSITION_LIMIT = 0.30
 
+# Risk management
 SL_BUFFER_ATR = 0.10
 RISK_REWARD = 2.0
 
-EMA_SLOPE_LOOKBACK = 3
-
+# Signal timing
 MAX_SIGNAL_DELAY_MIN = 10
 
-# 0 = "বট চালু আছে" message on every run
+# Support / Resistance settings
+SR_PIVOT_LEFT = 2
+SR_PIVOT_RIGHT = 2
+SR_CLUSTER_ATR = 0.25
+SR_MAX_LEVELS = 3
+
+# Heartbeat
 HEARTBEAT_INTERVAL_MINUTES = 0
 
 STATE_FILE = Path("last_signal_state.json")
@@ -64,18 +77,25 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 UTC = dt.timezone.utc
 
 SESSION = requests.Session()
-SESSION.headers.update({"User-Agent": "EMA-Pinbar-Scanner/2.0"})
+SESSION.headers.update({
+    "User-Agent": "EMA-Pinbar-SR-Scanner/3.0"
+})
 
 
-# ---------------- TIME ----------------
+# ============================================================
+# TIME
+# ============================================================
 
 def now_utc():
     return dt.datetime.now(UTC)
 
 
-# ---------------- DATA FETCHING ----------------
+# ============================================================
+# DATA FETCHING
+# ============================================================
 
-def get_candles(td_symbol):
+def get_candles(td_symbol, interval, outputsize):
+
     if not TWELVE_DATA_API_KEY:
         raise RuntimeError("Missing TWELVE_DATA_API_KEY")
 
@@ -83,8 +103,8 @@ def get_candles(td_symbol):
         "https://api.twelvedata.com/time_series",
         params={
             "symbol": td_symbol,
-            "interval": INTERVAL,
-            "outputsize": CANDLES_NEEDED,
+            "interval": interval,
+            "outputsize": outputsize,
             "timezone": "UTC",
             "apikey": TWELVE_DATA_API_KEY,
         },
@@ -100,8 +120,10 @@ def get_candles(td_symbol):
     candles = []
 
     for row in reversed(data["values"]):
+
         timestamp = dt.datetime.strptime(
-            row["datetime"], "%Y-%m-%d %H:%M:%S"
+            row["datetime"],
+            "%Y-%m-%d %H:%M:%S"
         ).replace(tzinfo=UTC)
 
         candles.append({
@@ -116,27 +138,32 @@ def get_candles(td_symbol):
     return candles
 
 
-def drop_unclosed(candles):
-    """
-    Assumes Twelve Data timestamps represent candle OPEN time.
-    Verify this convention for your selected data feed.
-    """
+def drop_unclosed(candles, interval_minutes):
 
     if not candles:
         return []
 
-    last = candles[-1]
-    close_time = last["dt"] + dt.timedelta(minutes=INTERVAL_MINUTES)
+    current_time = now_utc()
+    closed = []
 
-    if close_time > now_utc():
-        return candles[:-1]
+    for candle in candles:
 
-    return candles
+        close_time = candle["dt"] + dt.timedelta(
+            minutes=interval_minutes
+        )
+
+        if close_time <= current_time:
+            closed.append(candle)
+
+    return closed
 
 
-# ---------------- INDICATORS ----------------
+# ============================================================
+# INDICATORS
+# ============================================================
 
 def ema_series(values, period):
+
     result = [None] * len(values)
 
     if len(values) < period:
@@ -147,6 +174,7 @@ def ema_series(values, period):
     result[period - 1] = sum(values[:period]) / period
 
     for i in range(period, len(values)):
+
         result[i] = (
             values[i] * k
             + result[i - 1] * (1 - k)
@@ -156,14 +184,17 @@ def ema_series(values, period):
 
 
 def atr_series(candles, period):
+
     if not candles:
         return []
 
     true_ranges = []
 
     for i, candle in enumerate(candles):
+
         if i == 0:
             tr = candle["high"] - candle["low"]
+
         else:
             previous_close = candles[i - 1]["close"]
 
@@ -180,19 +211,26 @@ def atr_series(candles, period):
     if len(candles) < period:
         return result
 
-    result[period - 1] = sum(true_ranges[:period]) / period
+    result[period - 1] = (
+        sum(true_ranges[:period]) / period
+    )
 
     for i in range(period, len(candles)):
+
         result[i] = (
-            result[i - 1] * (period - 1) + true_ranges[i]
+            result[i - 1] * (period - 1)
+            + true_ranges[i]
         ) / period
 
     return result
 
 
-# ---------------- PINBAR DETECTION ----------------
+# ============================================================
+# PINBAR DETECTION
+# ============================================================
 
 def classify_pinbar(candle):
+
     o = candle["open"]
     h = candle["high"]
     l = candle["low"]
@@ -204,8 +242,6 @@ def classify_pinbar(candle):
         return None
 
     body = abs(c - o)
-
-    # Avoid division by zero for doji candles
     body_for_ratio = max(body, candle_range * 0.01)
 
     upper_wick = h - max(o, c)
@@ -232,9 +268,12 @@ def classify_pinbar(candle):
     return None
 
 
-# ---------------- EMA TOUCH ----------------
+# ============================================================
+# EMA TOUCH
+# ============================================================
 
 def touches_ema(candle, ema_value, atr_value, tolerance_multiplier):
+
     tolerance = atr_value * tolerance_multiplier
 
     return (
@@ -243,7 +282,240 @@ def touches_ema(candle, ema_value, atr_value, tolerance_multiplier):
     )
 
 
-# ---------------- SIGNAL ENGINE ----------------
+# ============================================================
+# 30M SUPPORT / RESISTANCE ENGINE
+# ============================================================
+
+def calculate_sr_atr(candles, period=14):
+
+    if len(candles) < period + 1:
+        return None
+
+    trs = []
+
+    for i in range(1, len(candles)):
+
+        current = candles[i]
+        previous = candles[i - 1]
+
+        tr = max(
+            current["high"] - current["low"],
+            abs(current["high"] - previous["close"]),
+            abs(current["low"] - previous["close"]),
+        )
+
+        trs.append(tr)
+
+    return sum(trs[-period:]) / period
+
+
+def identify_sr_levels(candles, current_price):
+
+    candles = candles[-SR_LOOKBACK:]
+
+    empty_result = {
+        "support": [],
+        "resistance": [],
+        "nearest_support": None,
+        "nearest_resistance": None,
+        "atr": None,
+    }
+
+    if len(candles) < 30:
+        return empty_result
+
+    atr = calculate_sr_atr(candles)
+
+    if atr is None or atr <= 0:
+        return empty_result
+
+    tolerance = atr * SR_CLUSTER_ATR
+
+    support_candidates = []
+    resistance_candidates = []
+
+    left = SR_PIVOT_LEFT
+    right = SR_PIVOT_RIGHT
+
+    # Confirmed swing points
+    for i in range(left, len(candles) - right):
+
+        candle = candles[i]
+
+        left_candles = candles[i-left:i]
+        right_candles = candles[i+1:i+right+1]
+
+        # Swing Low
+        is_swing_low = all(
+            candle["low"] < x["low"]
+            for x in left_candles + right_candles
+        )
+
+        if is_swing_low:
+
+            support_candidates.append({
+                "price": candle["low"],
+                "time": candle["time"],
+            })
+
+        # Swing High
+        is_swing_high = all(
+            candle["high"] > x["high"]
+            for x in left_candles + right_candles
+        )
+
+        if is_swing_high:
+
+            resistance_candidates.append({
+                "price": candle["high"],
+                "time": candle["time"],
+            })
+
+    def cluster_levels(candidates):
+
+        if not candidates:
+            return []
+
+        candidates = sorted(
+            candidates,
+            key=lambda x: x["price"]
+        )
+
+        clusters = []
+
+        for candidate in candidates:
+
+            if not clusters:
+                clusters.append([candidate])
+                continue
+
+            last_cluster = clusters[-1]
+
+            average = sum(
+                x["price"] for x in last_cluster
+            ) / len(last_cluster)
+
+            if abs(candidate["price"] - average) <= tolerance:
+                last_cluster.append(candidate)
+
+            else:
+                clusters.append([candidate])
+
+        levels = []
+
+        for cluster in clusters:
+
+            price = sum(
+                x["price"] for x in cluster
+            ) / len(cluster)
+
+            levels.append({
+                "price": price,
+                "touches": len(cluster),
+                "time": cluster[-1]["time"],
+            })
+
+        return levels
+
+    supports = cluster_levels(support_candidates)
+    resistances = cluster_levels(resistance_candidates)
+
+    # Keep only levels on the relevant side of price
+    supports = [
+        x for x in supports
+        if x["price"] < current_price
+    ]
+
+    resistances = [
+        x for x in resistances
+        if x["price"] > current_price
+    ]
+
+    supports.sort(
+        key=lambda x: current_price - x["price"]
+    )
+
+    resistances.sort(
+        key=lambda x: x["price"] - current_price
+    )
+
+    return {
+        "support": supports[:SR_MAX_LEVELS],
+        "resistance": resistances[:SR_MAX_LEVELS],
+        "nearest_support": supports[0] if supports else None,
+        "nearest_resistance": resistances[0] if resistances else None,
+        "atr": atr,
+    }
+
+
+def format_sr_message(sr, current_price):
+
+    lines = [
+        "\n📊 <b>30M SUPPORT / RESISTANCE</b>"
+    ]
+
+    support = sr["nearest_support"]
+    resistance = sr["nearest_resistance"]
+
+    if support:
+
+        distance = current_price - support["price"]
+
+        lines.extend([
+            f"🟢 Support: <b>{support['price']:.3f}</b>",
+            f"Distance: {distance:.3f}",
+            f"Swing points: {support['touches']}",
+        ])
+
+    else:
+        lines.append("🟢 Support: পাওয়া যায়নি")
+
+    if resistance:
+
+        distance = resistance["price"] - current_price
+
+        lines.extend([
+            f"🔴 Resistance: <b>{resistance['price']:.3f}</b>",
+            f"Distance: {distance:.3f}",
+            f"Swing points: {resistance['touches']}",
+        ])
+
+    else:
+        lines.append("🔴 Resistance: পাওয়া যায়নি")
+
+    # Additional levels
+    if len(sr["support"]) > 1:
+
+        lines.append("\n<b>Other Support Levels</b>")
+
+        for level in sr["support"][1:]:
+
+            lines.append(
+                f"• {level['price']:.3f} "
+                f"({level['touches']} swing points)"
+            )
+
+    if len(sr["resistance"]) > 1:
+
+        lines.append("\n<b>Other Resistance Levels</b>")
+
+        for level in sr["resistance"][1:]:
+
+            lines.append(
+                f"• {level['price']:.3f} "
+                f"({level['touches']} swing points)"
+            )
+
+    lines.append(
+        "\n<i>Calculated from closed 30M candles.</i>"
+    )
+
+    return "\n".join(lines)
+
+
+# ============================================================
+# SIGNAL ENGINE
+# ============================================================
 
 def check_signal(candles, config):
 
@@ -267,8 +539,12 @@ def check_signal(candles, config):
     j = i - EMA_SLOPE_LOOKBACK
 
     if any(x is None for x in (
-        ema9[i], ema15[i], atr[i], ema15[p], ema15[j],
-        ema9[j]
+        ema9[i],
+        ema15[i],
+        atr[i],
+        ema15[p],
+        ema15[j],
+        ema9[j],
     )):
         return None
 
@@ -293,7 +569,6 @@ def check_signal(candles, config):
     ):
         return None
 
-    # Trend filters
     trend_up = (
         ema9[i] > ema15[i]
         and ema15[i] > ema15[j]
@@ -308,11 +583,9 @@ def check_signal(candles, config):
 
     buffer_distance = SL_BUFFER_ATR * atr_now
 
-    # ---------------- BUY ----------------
-
+    # BUY
     if pinbar_type == "bullish" and trend_up:
 
-        # Previous candle should be on trend side of EMA15
         if previous["close"] <= ema15[p]:
             return None
 
@@ -326,17 +599,17 @@ def check_signal(candles, config):
 
         risk_atr = risk / atr_now
 
-        if risk_atr < config["min_sl_atr"]:
-            return None
-
-        if risk_atr > config["max_sl_atr"]:
+        if not (
+            config["min_sl_atr"]
+            <= risk_atr
+            <= config["max_sl_atr"]
+        ):
             return None
 
         tp = entry + RISK_REWARD * risk
         side = "BUY"
 
-    # ---------------- SELL ----------------
-
+    # SELL
     elif pinbar_type == "bearish" and trend_down:
 
         if previous["close"] >= ema15[p]:
@@ -352,10 +625,11 @@ def check_signal(candles, config):
 
         risk_atr = risk / atr_now
 
-        if risk_atr < config["min_sl_atr"]:
-            return None
-
-        if risk_atr > config["max_sl_atr"]:
+        if not (
+            config["min_sl_atr"]
+            <= risk_atr
+            <= config["max_sl_atr"]
+        ):
             return None
 
         tp = entry - RISK_REWARD * risk
@@ -384,7 +658,9 @@ def check_signal(candles, config):
     }
 
 
-# ---------------- TELEGRAM ----------------
+# ============================================================
+# TELEGRAM
+# ============================================================
 
 def send_telegram(message):
 
@@ -411,25 +687,32 @@ def send_telegram(message):
     result = response.json()
 
     if not result.get("ok"):
-        raise RuntimeError(f"Telegram rejected message: {result}")
+        raise RuntimeError(
+            f"Telegram rejected message: {result}"
+        )
 
     return True
 
 
-# ---------------- STATE ----------------
+# ============================================================
+# STATE MANAGEMENT
+# ============================================================
 
 def load_state():
+
     if not STATE_FILE.exists():
         return {}
 
     try:
         with STATE_FILE.open("r", encoding="utf-8") as f:
             return json.load(f)
+
     except (json.JSONDecodeError, OSError):
         return {}
 
 
 def save_state(state):
+
     temp_file = STATE_FILE.with_suffix(".tmp")
 
     with temp_file.open("w", encoding="utf-8") as f:
@@ -438,9 +721,12 @@ def save_state(state):
     temp_file.replace(STATE_FILE)
 
 
-# ---------------- HEARTBEAT ----------------
+# ============================================================
+# HEARTBEAT
+# ============================================================
 
 def should_send_heartbeat(state):
+
     last = state.get("_last_heartbeat")
 
     if not last:
@@ -451,55 +737,130 @@ def should_send_heartbeat(state):
     if last_time.tzinfo is None:
         last_time = last_time.replace(tzinfo=UTC)
 
-    elapsed = (now_utc() - last_time).total_seconds() / 60
+    elapsed = (
+        now_utc() - last_time
+    ).total_seconds() / 60
 
     return elapsed >= HEARTBEAT_INTERVAL_MINUTES
 
 
-def send_heartbeat(prices):
+def send_heartbeat(market_data):
+
     stamp = now_utc().strftime("%Y-%m-%d %H:%M UTC")
 
     lines = [
-        f"✅ <b>বট চালু আছে</b> ({stamp})"
+        f"✅ <b>বট চালু আছে</b>",
+        f"সময়: {stamp}",
     ]
 
-    for name, price in prices.items():
-        if price is None:
-            lines.append(f"{name}: ডেটা আনতে ব্যর্থ")
+    for name, data in market_data.items():
+
+        lines.append(f"\n<b>{name}</b>")
+
+        if data is None:
+            lines.append("ডেটা আনতে ব্যর্থ")
+            continue
+
+        price = data["price"]
+        sr = data["sr"]
+
+        lines.append(f"Price: {price:.3f}")
+
+        support = sr["nearest_support"]
+        resistance = sr["nearest_resistance"]
+
+        if support:
+            lines.append(
+                f"🟢 Support: {support['price']:.3f}"
+            )
         else:
-            lines.append(f"{name}: {price:.3f}")
+            lines.append("🟢 Support: পাওয়া যায়নি")
+
+        if resistance:
+            lines.append(
+                f"🔴 Resistance: {resistance['price']:.3f}"
+            )
+        else:
+            lines.append("🔴 Resistance: পাওয়া যায়নি")
 
     return send_telegram("\n".join(lines))
 
 
-# ---------------- MAIN ----------------
+# ============================================================
+# MAIN
+# ============================================================
 
 def main():
 
     state = load_state()
-    last_prices = {}
+    market_data = {}
 
     for config in SYMBOLS:
 
         name = config["name"]
 
         try:
-            raw = get_candles(config["td_symbol"])
 
-            if not raw:
-                print(f"[{name}] Empty candle response")
-                last_prices[name] = None
-                continue
+            # ---------------- 15M DATA ----------------
 
-            # Latest returned close is a data-feed reference,
-            # not guaranteed to be a live executable quote.
-            last_prices[name] = raw[-1]["close"]
+            raw = get_candles(
+                config["td_symbol"],
+                interval=INTERVAL,
+                outputsize=CANDLES_NEEDED,
+            )
 
-            candles = drop_unclosed(raw)
+            candles = drop_unclosed(
+                raw,
+                INTERVAL_MINUTES,
+            )
 
             if not candles:
-                print(f"[{name}] No closed candles")
+                print(f"[{name}] No closed 15M candles")
+                market_data[name] = None
                 continue
+
+            current_price = candles[-1]["close"]
+
+            # ---------------- 30M DATA ----------------
+
+            sr_raw = get_candles(
+                config["td_symbol"],
+                interval=SR_INTERVAL,
+                outputsize=SR_LOOKBACK + 20,
+            )
+
+            sr_candles = drop_unclosed(
+                sr_raw,
+                SR_INTERVAL_MINUTES,
+            )
+
+            sr_data = identify_sr_levels(
+                sr_candles,
+                current_price,
+            )
+
+            market_data[name] = {
+                "price": current_price,
+                "sr": sr_data,
+            }
+
+            print(
+                f"[{name}] Price: {current_price:.3f}"
+            )
+
+            if sr_data["nearest_support"]:
+                print(
+                    f"[{name}] Support: "
+                    f"{sr_data['nearest_support']['price']:.3f}"
+                )
+
+            if sr_data["nearest_resistance"]:
+                print(
+                    f"[{name}] Resistance: "
+                    f"{sr_data['nearest_resistance']['price']:.3f}"
+                )
+
+            # ---------------- SIGNAL ----------------
 
             signal = check_signal(candles, config)
 
@@ -528,55 +889,11 @@ def main():
 
             candle = signal["candle"]
 
+            sr_message = format_sr_message(
+                sr_data,
+                signal["entry"],
+            )
+
             message = (
                 f"📢 <b>{signal['side']} SIGNAL — {name}</b>\n"
-                f"Timeframe: 15M\n"
-                f"Strategy: EMA 9/15 + Pin Bar Rejection\n\n"
-                f"Entry: {signal['entry']:.3f}\n"
-                f"SL: {signal['sl']:.3f}\n"
-                f"TP: {signal['tp']:.3f}\n"
-                f"Risk: {signal['risk']:.3f}\n"
-                f"Risk in ATR: {signal['risk_atr']:.2f}\n"
-                f"RR: 1:{RISK_REWARD:.1f}\n\n"
-                f"Candle time UTC: {signal['time']}\n"
-                f"Signal delay: {delay_min:.1f} min\n\n"
-                f"<b>Confirmation Data</b>\n"
-                f"O: {candle['open']:.3f}\n"
-                f"H: {candle['high']:.3f}\n"
-                f"L: {candle['low']:.3f}\n"
-                f"C: {candle['close']:.3f}\n"
-                f"EMA9: {signal['ema9']:.3f}\n"
-                f"EMA15: {signal['ema15']:.3f}\n"
-                f"ATR14: {signal['atr']:.3f}\n\n"
-                f"⚠️ Verify current market price, spread "
-                f"and slippage before entry.\n"
-                f"<i>Data: Twelve Data. Broker prices may differ.</i>"
-            )
-
-            # Save state ONLY after successful Telegram delivery
-            send_telegram(message)
-
-            state[name] = signal["time"]
-
-            print(
-                f"[{name}] SIGNAL SENT: "
-                f"{signal['side']} @ {signal['entry']}"
-            )
-
-        except Exception as error:
-            print(f"[{name}] ERROR: {error}")
-            last_prices[name] = None
-
-    try:
-        if should_send_heartbeat(state):
-            send_heartbeat(last_prices)
-            state["_last_heartbeat"] = now_utc().isoformat()
-
-    except Exception as error:
-        print(f"Heartbeat error: {error}")
-
-    save_state(state)
-
-
-if __name__ == "__main__":
-    main()
+                f"Time
