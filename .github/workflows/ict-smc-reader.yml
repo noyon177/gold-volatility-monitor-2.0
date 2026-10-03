@@ -1,0 +1,69 @@
+name: ICT SMC Market Reader
+
+# Save this file in your repository as:
+#   .github/workflows/ict-smc-reader.yml
+#
+# Required repository secrets (Settings -> Secrets and variables -> Actions):
+#   TWELVE_DATA_API_KEY
+#   TELEGRAM_BOT_TOKEN
+#   TELEGRAM_CHAT_ID
+#
+# The script file must be in the repository root:
+#   ict_smc_market_reader_v2.py
+
+on:
+  schedule:
+    # Runs 1 minute after every 15M candle close (UTC): :01, :16, :31, :46
+    - cron: "1,16,31,46 * * * *"
+  workflow_dispatch: {}  # allows manual runs from the Actions tab
+
+# Never let two runs overlap; a new run waits instead of cancelling the current one.
+concurrency:
+  group: ict-smc-reader
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  run-reader:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install requests
+
+      # The bot stores the last sent signal in ict_smc_state.json to avoid
+      # duplicate alerts. GitHub runners are wiped after every run, so the
+      # file is restored from, and saved back to, the Actions cache.
+      - name: Restore state file
+        uses: actions/cache/restore@v4
+        with:
+          path: ict_smc_state.json
+          key: ict-state-${{ github.run_id }}
+          restore-keys: |
+            ict-state-
+
+      - name: Run market reader
+        env:
+          TWELVE_DATA_API_KEY: ${{ secrets.TWELVE_DATA_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python ict_smc_market_reader_v2.py
+
+      - name: Save state file
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ict_smc_state.json
+          key: ict-state-${{ github.run_id }}
