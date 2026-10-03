@@ -1,0 +1,90 @@
+name: ICT SMC Market Reader
+
+on:
+  schedule:
+    # London killzone 07:00-10:00 UTC, every 5 min (Mon-Fri)
+    - cron: "*/5 7-9 * * 1-5"
+    # New York killzone 13:00-16:00 UTC, every 5 min (Mon-Fri)
+    - cron: "*/5 13-15 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Run mode"
+        type: choice
+        default: once
+        options:
+          - once
+          - backtest
+
+# Prevent overlapping runs (state file would conflict)
+concurrency:
+  group: ict-smc-market-reader
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      TWELVE_DATA_API_KEY: ${{ secrets.TWELVE_DATA_API_KEY }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      # Optional: JSON list of news events for the news blackout filter
+      NEWS_EVENTS_JSON: ${{ secrets.NEWS_EVENTS_JSON }}
+      ICT_SMC_STATE_FILE: ict_smc_state_v2.json
+      ICT_SMC_TRADE_LOG: ict_smc_trades_v2.jsonl
+      ICT_SMC_BACKTEST_REPORT: ict_smc_backtest_report.json
+      ICT_SMC_CACHE_DIR: .ict_smc_cache
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install requests
+
+      # State must survive between runs (duplicate-signal protection, open trades)
+      - name: Restore state
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ict_smc_state_v2.json
+            ict_smc_trades_v2.jsonl
+          key: ict-smc-state-${{ github.run_id }}
+          restore-keys: |
+            ict-smc-state-
+
+      - name: Run signal scan
+        if: ${{ github.event_name == 'schedule' || inputs.mode == 'once' }}
+        run: python ict_smc_market_reader_v2.py --once
+
+      - name: Run backtest
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'backtest' }}
+        run: python ict_smc_market_reader_v2.py --backtest
+
+      - name: Save state
+        if: ${{ always() }}
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ict_smc_state_v2.json
+            ict_smc_trades_v2.jsonl
+          key: ict-smc-state-${{ github.run_id }}
+
+      - name: Upload backtest report
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'backtest' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ict-smc-backtest-report
+          path: ict_smc_backtest_report.json
+          if-no-files-found: warn
