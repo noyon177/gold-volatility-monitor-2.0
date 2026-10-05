@@ -1,0 +1,38 @@
+name: ICT SMC Market Reader
+
+on:
+  schedule:
+    - cron: "2,17,32,47 * * * *"   # every 15 min, a couple of minutes after the 15M candle closes
+  workflow_dispatch: {}
+
+concurrency:
+  group: ict-smc
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install requests matplotlib
+      - name: Run bot
+        env:
+          TWELVE_DATA_API_KEY: ${{ secrets.TWELVE_DATA_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          ACCOUNT_BALANCE: ${{ vars.ACCOUNT_BALANCE }}
+          RISK_PERCENT: ${{ vars.RISK_PERCENT }}
+        run: python ict_smc_market_reader_v3.py
+      - name: Save state (open trades, log, cache)
+        run: |
+          git config user.name "ict-bot"
+          git config user.email "ict-bot@users.noreply.github.com"
+          git add ict_smc_state.json signals_log.csv candle_cache.json || true
+          git diff --cached --quiet || (git commit -m "bot state" && git pull --rebase -q && git push)
