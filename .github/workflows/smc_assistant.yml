@@ -1,12 +1,12 @@
 name: SMC Day-Trading Assistant
 
 on:
-  # One run is queued every hour; when the previous one finishes, the next starts right away
+  # Every 15 minutes, 1 minute after the 15M candle closes
   schedule:
-    - cron: "0 * * * *"
+    - cron: "1,16,31,46 * * * *"
   workflow_dispatch:
 
-# Never run more than one instance at a time (prevents duplicate signals)
+# Never run two instances at once (prevents duplicate signals)
 concurrency:
   group: smc-assistant
   cancel-in-progress: false
@@ -17,14 +17,20 @@ permissions:
 jobs:
   run-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 358   # GitHub Actions hard limit is 360 minutes
+    timeout-minutes: 10
 
     env:
       TWELVE_DATA_API_KEY: ${{ secrets.TWELVE_DATA_API_KEY }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-      SMC_RUN_FOREVER: "1"
-      SMC_SCAN_SECONDS: "60"
+      # One scan per run, then exit
+      SMC_RUN_FOREVER: "0"
+      # No "started" Telegram message on every run
+      SMC_STARTUP_MSG: "0"
+      # Free plan allows 8 credits/min, so pause between calls
+      SMC_REQUEST_GAP_SECONDS: "8"
+      # Runs are 15 min apart, so allow a slightly older MSS
+      SMC_MAX_SIGNAL_AGE_MIN: "20"
       SMC_MAX_SIGNALS_DAY: "4"
       SMC_MAX_SYMBOL_SIGNALS_DAY: "2"
       SMC_MIN_SCORE: "8"
@@ -54,10 +60,8 @@ jobs:
           restore-keys: |
             smc-state-
 
-      # Stops itself after 5h45m so there is time left to save state
       - name: Run SMC assistant
-        run: |
-          timeout 345m python smc_day_trading_assistant_v1.py || [ $? -eq 124 ]
+        run: python smc_day_trading_assistant_v1.py
 
       - name: Save state
         if: always()
