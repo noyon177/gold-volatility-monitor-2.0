@@ -1,1 +1,70 @@
+name: SMC Day-Trading Assistant
 
+on:
+  # One run is queued every hour; when the previous one finishes, the next starts right away
+  schedule:
+    - cron: "0 * * * *"
+  workflow_dispatch:
+
+# Never run more than one instance at a time (prevents duplicate signals)
+concurrency:
+  group: smc-assistant
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 358   # GitHub Actions hard limit is 360 minutes
+
+    env:
+      TWELVE_DATA_API_KEY: ${{ secrets.TWELVE_DATA_API_KEY }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      SMC_RUN_FOREVER: "1"
+      SMC_SCAN_SECONDS: "60"
+      SMC_MAX_SIGNALS_DAY: "4"
+      SMC_MAX_SYMBOL_SIGNALS_DAY: "2"
+      SMC_MIN_SCORE: "8"
+      SMC_STATE_FILE: smc_day_trading_state.json
+      SMC_TRADE_LOG: smc_day_trading_trades.jsonl
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install requests
+
+      # Restore state from the previous run so the same signal is not sent twice
+      - name: Restore state
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            smc_day_trading_state.json
+            smc_day_trading_trades.jsonl
+          key: smc-state-${{ github.run_id }}
+          restore-keys: |
+            smc-state-
+
+      # Stops itself after 5h45m so there is time left to save state
+      - name: Run SMC assistant
+        run: |
+          timeout 345m python smc_day_trading_assistant_v1.py || [ $? -eq 124 ]
+
+      - name: Save state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            smc_day_trading_state.json
+            smc_day_trading_trades.jsonl
+          key: smc-state-${{ github.run_id }}
