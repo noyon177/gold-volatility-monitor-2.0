@@ -10,9 +10,7 @@ name: ICT SMC Market Reader
 
 on:
   schedule:
-    # Every 15 minutes, offset by 2 minutes so the 15M candle is already
-    # closed and available from the data provider when the script runs.
-    # GitHub cron is in UTC and may start several minutes late.
+    # Every 15 minutes (UTC), offset by 2 minutes so the 15M candle is closed.
     - cron: "2,17,32,47 * * * *"
 
   workflow_dispatch:
@@ -26,7 +24,6 @@ on:
         type: boolean
         default: true
 
-# Never run two scans at the same time (protects the state file and API quota).
 concurrency:
   group: ict-smc-market-reader
   cancel-in-progress: false
@@ -55,15 +52,12 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: pip
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install requests
 
-      # The script stores duplicate-signal protection and hourly status
-      # markers in ict_smc_state.json. Restore the latest copy before the run.
       - name: Restore state file
         uses: actions/cache/restore@v4
         with:
@@ -75,7 +69,6 @@ jobs:
       - name: Run ICT SMC Market Reader
         run: python ict_smc_market_reader_v2.py
 
-      # Save the updated state even if the run failed part-way through.
       - name: Save state file
         if: always()
         uses: actions/cache/save@v4
