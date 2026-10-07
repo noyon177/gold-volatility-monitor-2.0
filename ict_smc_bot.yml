@@ -1,0 +1,66 @@
+name: ICT SMC Market Reader v3
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"        # every 15 minutes, 24/7 (UTC)
+  workflow_dispatch:
+    inputs:
+      test_telegram:
+        description: "Only send a Telegram test message (1 = yes)"
+        required: false
+        default: "0"
+
+# never let two runs overlap (state file would clash)
+concurrency:
+  group: ict-smc-bot
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install requests
+
+      # Bot memory (trades, daily cap, news alerts sent, candle cache).
+      # Each run saves a new cache entry; the next run restores the newest one.
+      - name: Restore bot state
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ict_smc_state.json
+            ict_smc_cache.json
+          key: ict-state-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            ict-state-
+
+      - name: Run bot
+        env:
+          TWELVE_DATA_API_KEY: ${{ secrets.TWELVE_DATA_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          SEND_STATUS_UPDATES: "1"
+          TEST_TELEGRAM: ${{ github.event.inputs.test_telegram || '0' }}
+        run: python ict_smc_market_reader_v3.py
+
+      - name: Save bot state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ict_smc_state.json
+            ict_smc_cache.json
+          key: ict-state-${{ github.run_id }}-${{ github.run_attempt }}
