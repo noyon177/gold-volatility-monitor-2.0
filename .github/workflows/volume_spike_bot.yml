@@ -1,0 +1,52 @@
+name: Volume Spike Bot
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"     # run every 15 minutes
+  workflow_dispatch:            # manual "Run workflow" button
+
+concurrency:
+  group: volume-spike-bot
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests
+
+      # Restore the last-alert state so the same candle never alerts twice
+      - name: Restore state
+        uses: actions/cache/restore@v4
+        with:
+          path: volume_state.json
+          key: volume-state-${{ github.run_id }}
+          restore-keys: |
+            volume-state-
+
+      - name: Run volume spike scan
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
+          TWELVE_DATA_API_KEY: ${{ secrets.TWELVE_DATA_API_KEY }}   # alternate secret name, either one works
+          TIMEFRAME: "15min"     # 5min / 15min / 30min / 1h
+          VOL_LOOKBACK: "20"     # candles used for the average volume
+          RVOL_MIN: "2.0"        # minimum relative volume (x times the average)
+          Z_MIN: "2.0"           # minimum volume z-score
+        run: python volume_spike_bot.py
+
+      - name: Save state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: volume_state.json
+          key: volume-state-${{ github.run_id }}
