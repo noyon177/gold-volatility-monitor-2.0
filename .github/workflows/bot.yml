@@ -1,0 +1,60 @@
+name: ICT SMC Scalp Bot v8
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ict-smc-bot
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install packages
+        run: pip install requests numpy scikit-learn joblib
+
+      - name: Run bot
+        env:
+          TWELVE_DATA_API_KEY: ${{ secrets.TWELVE_DATA_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # ML filter: if ml_model.joblib is missing the bot works exactly like v7
+          ML_ON: ${{ vars.ML_ON || '1' }}
+          ML_THRESHOLD: ${{ vars.ML_THRESHOLD }}
+          ACCOUNT_BALANCE: ${{ vars.ACCOUNT_BALANCE }}
+          RISK_PCT: ${{ vars.RISK_PCT }}
+          XAU_SPREAD: ${{ vars.XAU_SPREAD }}
+          BTC_SPREAD: ${{ vars.BTC_SPREAD }}
+          SCALP_MIN_SCORE: ${{ vars.SCALP_MIN_SCORE }}
+          BTC_MIN_SCORE: ${{ vars.BTC_MIN_SCORE }}
+          SEND_STATUS_UPDATES: ${{ vars.SEND_STATUS_UPDATES }}
+          SEND_WATCHLIST: ${{ vars.SEND_WATCHLIST }}
+        run: python ict_smc_market_reader_v8.py
+
+      - name: Save bot state
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if [ -f ict_smc_state.json ]; then
+            git add ict_smc_state.json
+            if ! git diff --cached --quiet; then
+              git commit -m "bot state update"
+              git push || (git pull --rebase -X theirs && git push)
+            fi
+          fi
