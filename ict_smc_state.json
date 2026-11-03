@@ -2,12 +2,14 @@
   "state_version": 3,
   "open_trades": [],
   "closed_trades": [],
-  "news_fetched": "2026-11-03T11:25:11.632924+00:00",
+  "news_fetched": "2026-11-03T18:37:13.768535+00:00",
   "news_events": [
     "2026-11-03 15:16",
     "2026-11-06 13:30"
   ],
-  "status:XAUUSD": "2026-11-03 b3",
-  "status:BTCUSD": "2026-11-03 b3",
-  "api:2026-11-03": 2
+  "status:XAUUSD": "2026-11-03 b6",
+  "status:BTCUSD": "2026-11-03 b6",
+  "api:2026-11-03": 4,
+  "watchts:XAUUSD:BUY": "2026-11-03T18:37:13.890083+00:00",
+  "watchts:BTCUSD:BUY": "2026-11-03T18:37:14.890625+00:00"
 }
