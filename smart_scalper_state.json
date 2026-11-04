@@ -1,0 +1,13 @@
+{
+ "state_version": 1,
+ "open_trades": [],
+ "closed_trades": [],
+ "post_sl": [],
+ "sent_keys": [],
+ "news_fetched": "2026-11-04T20:03:27.520629+00:00",
+ "news_events": [
+  "2026-11-03 15:16",
+  "2026-11-06 13:30"
+ ],
+ "dailysent": "2026-11-04"
+}
