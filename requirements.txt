@@ -1,6 +1,0 @@
-requests
-numpy
-pandas
-scikit-learn
-joblib
-tzdata
