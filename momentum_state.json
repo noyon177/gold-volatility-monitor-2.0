@@ -2,11 +2,12 @@
  "settings": {
   "enabled": true,
   "mute_until": null,
-  "level": "mid",
+  "level": "high",
   "sym": {
    "XAUUSD": true,
    "BTCUSD": true
   }
  },
- "tg_offset": 388964235
+ "tg_offset": 388964238,
+ "XAUUSD_PANIC": "2026-11-06T13:00:00+00:00"
 }
