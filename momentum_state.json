@@ -1,0 +1,12 @@
+{
+ "settings": {
+  "enabled": true,
+  "mute_until": null,
+  "level": "mid",
+  "sym": {
+   "XAUUSD": true,
+   "BTCUSD": true
+  }
+ },
+ "tg_offset": 388964233
+}
