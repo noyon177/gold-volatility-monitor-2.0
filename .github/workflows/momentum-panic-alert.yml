@@ -1,0 +1,44 @@
+name: Momentum & Panic Volume Alert
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: momentum-panic-alert
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install requests
+
+      - name: Run bot
+        env:
+          TWELVE_DATA_API_KEY: ${{ secrets.TWELVE_DATA_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python momentum_panic_alert.py
+
+      - name: Save state
+        run: |
+          if [ -f momentum_state.json ] && [ -n "$(git status --porcelain momentum_state.json)" ]; then
+            git config user.name "github-actions"
+            git config user.email "actions@github.com"
+            git add momentum_state.json
+            git commit -m "update alert state"
+            git pull --rebase
+            git push
+          fi
