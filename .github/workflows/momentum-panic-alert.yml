@@ -4,6 +4,10 @@ on:
   schedule:
     - cron: "*/5 * * * *"
   workflow_dispatch:
+    inputs:
+      test:
+        description: "টেস্ট মেসেজ পাঠাতে true দিন"
+        default: "false"
 
 permissions:
   contents: write
@@ -30,6 +34,7 @@ jobs:
           TWELVE_DATA_API_KEY: ${{ secrets.TWELVE_DATA_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TEST_MODE: ${{ github.event.inputs.test }}
         run: python momentum_panic_alert.py
 
       - name: Save state
