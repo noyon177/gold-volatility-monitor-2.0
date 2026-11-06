@@ -2,12 +2,12 @@
   "settings": {
     "enabled": true,
     "mute_until": null,
-    "level": "mid",
+    "level": "low",
     "sym": {
       "XAUUSD": true,
       "BTCUSD": true
     }
   },
   "BTCUSD_MOMENTUM": "2026-11-06T13:30:00+00:00",
-  "tg_offset": 388964240
+  "tg_offset": 388964242
 }
